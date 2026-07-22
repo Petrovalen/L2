@@ -31,6 +31,7 @@ from vision import bars
 # Человекочитаемые подписи действий для ленты.
 ACTION_LABELS = {
     "target_nearest": "выбор цели",
+    "target_macro": "цель по имени (F6)",
     "attack": "атака",
     "assist_skill": "доп. скилл",
     "heal_potion": "хилка",
@@ -84,6 +85,9 @@ class BotWorker(threading.Thread):
 
         self.q.put(("log", "Бот работает."))
         breaks = BreakScheduler(time.monotonic())
+        if config.BREAKS_ENABLED:
+            self.q.put(("log", f"Следующий перерыв через ~{int(breaks.until_due(time.monotonic()))} c."))
+        deferred_logged = False
         try:
             with ScreenCapture() as cap:
                 while not self._stop.is_set():
@@ -99,8 +103,9 @@ class BotWorker(threading.Thread):
                         hp = bars.read_self_bars(frame).get("hp", 100.0) or 100.0
                         if hp < config.HP_HEAL_THRESHOLD or breaks.remaining(mono) <= 0:
                             breaks.end(mono)
+                            deferred_logged = False
                             self.q.put(("resumed", None))
-                            self.q.put(("log", "— перерыв окончен, продолжаем —"))
+                            self.q.put(("log", f"— перерыв окончен. Следующий через ~{int(breaks.until_due(mono))} c —"))
                         else:
                             self.q.put(("break", int(breaks.remaining(mono))))
                             time.sleep(0.4)
@@ -112,13 +117,19 @@ class BotWorker(threading.Thread):
                         self.q.put(("log", f"Состояние → {status['state']}"))
                         self._last_state = status["state"]
 
-                    # начать перерыв, если пора и сейчас безопасно
-                    if (config.BREAKS_ENABLED and breaks.due(mono)
-                            and status["state"] == "SEARCH" and not status["target"]
-                            and (status["hp"] or 0) >= config.BREAK_SAFE_HP):
-                        dur = breaks.start(mono)
-                        self.q.put(("log", f"— перерыв ~{int(dur)} c (человеческая пауза) —"))
-                        continue
+                    # перерыв: стартуем только в безопасный момент
+                    if config.BREAKS_ENABLED and breaks.due(mono):
+                        safe = (status["state"] == "SEARCH" and not status["target"]
+                                and (status["hp"] or 0) >= config.BREAK_SAFE_HP)
+                        if safe:
+                            dur = breaks.start(mono)
+                            deferred_logged = False
+                            self.q.put(("log", f"— перерыв ~{int(dur)} c (человеческая пауза) —"))
+                            continue
+                        elif not deferred_logged:
+                            self.q.put(("log", f"Перерыв назначен — жду безопасного момента "
+                                               f"(нет цели, HP>={config.BREAK_SAFE_HP}%)."))
+                            deferred_logged = True
 
                     ctl.sleep(config.LOOP_DELAY)   # джиттер интервала цикла
         except Exception as e:  # failsafe pydirectinput и прочее

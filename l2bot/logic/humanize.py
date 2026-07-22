@@ -36,6 +36,12 @@ class BreakScheduler:
         """Пора ли сделать перерыв (и он сейчас не активен)."""
         return self._until is None and now >= self._due_at
 
+    def until_due(self, now):
+        """Сколько секунд до следующего перерыва (0, если уже пора/активен)."""
+        if self._until is not None:
+            return 0.0
+        return max(0.0, self._due_at - now)
+
     def start(self, now):
         """Начать перерыв. Возвращает его длительность (сек)."""
         dur = random.uniform(config.BREAK_DURATION_MIN, config.BREAK_DURATION_MAX)

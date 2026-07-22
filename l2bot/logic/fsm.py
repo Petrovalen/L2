@@ -28,6 +28,7 @@ class BotFSM:
         self.state = SEARCH
         self._combat_started = 0.0
         self._loot_started = 0.0
+        self._search_started = None   # когда вошли в поиск цели
 
     # ---- вспомогательные проверки ---------------------------------------
     def _survival(self, self_bars):
@@ -65,12 +66,22 @@ class BotFSM:
             "target_hp": target_hp,
         }
 
+    def _to_search(self, now):
+        self.state = SEARCH
+        self._search_started = now
+
     def _on_search(self, frame, target_present, now):
         if target_present:
             self._enter_combat(now)
             return
-        # пробуем выбрать ближайшую цель клавишей
+        if self._search_started is None:
+            self._search_started = now
+        # сначала обычный выбор ближайшей цели
         ctl.press_action("target_nearest")
+        # если ближняя цель не появилась за SEARCH_MACRO_AFTER — берём мобов
+        # издалека игровым макросом по имени (F6).
+        if now - self._search_started > config.SEARCH_MACRO_AFTER:
+            ctl.press_action("target_macro")
         # если есть шаблоны мобов — можно ещё кликнуть по ближайшему
         mobs = targets.find_mobs(frame)
         if mobs:
@@ -92,7 +103,7 @@ class BotFSM:
             return
         # таймаут боя (цель недостижима/убегает) -> сброс
         if now - self._combat_started > config.ATTACK_TIMEOUT:
-            self.state = SEARCH
+            self._to_search(now)
             return
         # доп. скилл прерывает автоатаку -> сразу после него возобновляем её.
         if ctl.press_action("assist_skill"):
@@ -105,4 +116,4 @@ class BotFSM:
     def _on_loot(self, now):
         ctl.press_action("pickup")
         if now - self._loot_started > config.LOOT_TIME:
-            self.state = SEARCH
+            self._to_search(now)
