@@ -80,6 +80,8 @@ class BotFSM:
     def _enter_combat(self, now):
         self.state = COMBAT
         self._combat_started = now
+        # запускаем автоатаку — один раз при взятии цели (бьётся до смерти).
+        ctl.press_action("attack", respect_cooldown=False)
 
     def _on_combat(self, target_present, now):
         # цель умерла/пропала -> лут
@@ -91,9 +93,13 @@ class BotFSM:
         if now - self._combat_started > config.ATTACK_TIMEOUT:
             self.state = SEARCH
             return
-        # оба вызова уважают свои кулдауны: атака часто, доп. скилл реже.
-        ctl.press_action("attack")
-        ctl.press_action("assist_skill")
+        # доп. скилл прерывает автоатаку -> сразу после него возобновляем её.
+        if ctl.press_action("assist_skill"):
+            ctl.press_action("attack", respect_cooldown=False)
+        else:
+            # страховка: если автоатака оборвалась — переначинаем изредка
+            # (интервал = кулдаун 'attack'). Спама атаки каждый тик больше нет.
+            ctl.press_action("attack")
 
     def _on_loot(self, now):
         ctl.press_action("pickup")
