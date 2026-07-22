@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Результат калибровки — машинно/разрешение-зависимый, генерируется утилитой
+l2bot/calibration_result.txt
+
+# ОС
+.DS_Store
+Thumbs.db

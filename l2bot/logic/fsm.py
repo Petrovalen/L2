@@ -91,7 +91,9 @@ class BotFSM:
         if now - self._combat_started > config.ATTACK_TIMEOUT:
             self.state = SEARCH
             return
+        # оба вызова уважают свои кулдауны: атака часто, доп. скилл реже.
         ctl.press_action("attack")
+        ctl.press_action("assist_skill")
 
     def _on_loot(self, now):
         ctl.press_action("pickup")

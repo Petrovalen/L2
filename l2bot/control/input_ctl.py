@@ -17,6 +17,24 @@ pydirectinput.PAUSE = 0.0
 # failsafe: увод мыши в угол экрана прерывает — оставим включённым для страховки.
 pydirectinput.FAILSAFE = True
 
+# Время последнего нажатия по каждому логическому действию (для кулдаунов).
+# Ключ — имя действия из config.KEYS, значение — момент time.monotonic().
+_last_action_ts = {}
+
+
+def cooldown_remaining(action_name):
+    """Сколько ещё секунд ждать до готовности действия (0.0 — готово)."""
+    cd = config.ACTION_COOLDOWNS.get(action_name, config.DEFAULT_COOLDOWN)
+    if cd <= 0:
+        return 0.0
+    elapsed = time.monotonic() - _last_action_ts.get(action_name, -1e9)
+    return max(0.0, cd - elapsed)
+
+
+def reset_cooldowns():
+    """Сбросить все кулдауны (например, при снятии с паузы)."""
+    _last_action_ts.clear()
+
 
 def _jittered(value):
     """Добавить случайный разброс ±HUMANIZE_JITTER к паузе."""
@@ -36,12 +54,21 @@ def press_key(key):
     pydirectinput.keyUp(key)
 
 
-def press_action(action_name):
-    """Нажать клавишу по логическому имени из config.KEYS."""
+def press_action(action_name, respect_cooldown=True):
+    """
+    Нажать клавишу по логическому имени из config.KEYS.
+
+    Возвращает True, если клавиша реально нажата; False — если действие не
+    задано (ключ None/пусто) или ещё не вышел его кулдаун.
+    respect_cooldown=False — форсировать нажатие, игнорируя кулдаун.
+    """
     key = config.KEYS.get(action_name)
     if not key:
         return False
+    if respect_cooldown and cooldown_remaining(action_name) > 0:
+        return False
     press_key(key)
+    _last_action_ts[action_name] = time.monotonic()
     return True
 
 
