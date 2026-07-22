@@ -16,22 +16,43 @@ def _to_frame_coords(x, y):
     return x - region["left"], y - region["top"]
 
 
+# Полуширина вертикальной полосы сэмплирования (строк вверх/вниз от y).
+_SAMPLE_BAND = 7
+# Столбец считаем «плотно красным» (реальная заливка, а не текст/шум),
+# если цвет совпал хотя бы в этой доле его пикселей по высоте.
+_COL_DENSE_MIN = 0.5
+
+
 def _fill_ratio(frame, x1, x2, y, color, tol):
-    """Доля залитых пикселей (0..1) вдоль линии y от x1 до x2."""
+    """
+    Уровень заполнения полоски (0..1) на отрезке [x1,x2] вокруг линии y.
+
+    Полоски L2 заполняются слева направо и опустошаются справа. Поэтому
+    уровень = как далеко вправо доходит «плотный красный». Считаем по полосе
+    высотой 2*_SAMPLE_BAND+1: для каждого столбца — доля совпавших с цветом
+    пикселей; «плотный» столбец = доля >= _COL_DENSE_MIN. Результат — позиция
+    самого правого плотного столбца, делённая на ширину.
+
+    Такой способ устойчив к тексту поверх полоски (числа HP/MP, подписи):
+    цифры по центру создают «дыры», но не сдвигают правую границу заливки.
+    """
     fx1, fy = _to_frame_coords(x1, y)
     fx2, _ = _to_frame_coords(x2, y)
     h, w = frame.shape[:2]
-    if not (0 <= fy < h) or fx1 >= fx2:
-        return 0.0
     fx1 = max(0, fx1)
     fx2 = min(w, fx2)
-    strip = frame[fy, fx1:fx2, :].astype(np.int16)  # (N,3) BGR
-    target = np.array(color, dtype=np.int16)
-    diff = np.abs(strip - target)
-    matched = np.all(diff <= tol, axis=1)
-    if matched.size == 0:
+    y0 = max(0, fy - _SAMPLE_BAND)
+    y1 = min(h, fy + _SAMPLE_BAND + 1)
+    if fx1 >= fx2 or y0 >= y1:
         return 0.0
-    return float(np.count_nonzero(matched)) / matched.size
+    region = frame[y0:y1, fx1:fx2, :].astype(np.int16)        # (rows, cols, 3) BGR
+    target = np.array(color, dtype=np.int16)
+    matched = np.all(np.abs(region - target) <= tol, axis=2)  # (rows, cols) bool
+    col_density = matched.mean(axis=0)                        # доля по высоте на столбец
+    dense = np.where(col_density >= _COL_DENSE_MIN)[0]
+    if dense.size == 0:
+        return 0.0
+    return float(dense.max() + 1) / col_density.size
 
 
 def read_bar(frame, bar_cfg):

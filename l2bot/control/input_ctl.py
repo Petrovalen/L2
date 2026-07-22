@@ -21,6 +21,11 @@ pydirectinput.FAILSAFE = True
 # Ключ — имя действия из config.KEYS, значение — момент time.monotonic().
 _last_action_ts = {}
 
+# Необязательный колбэк: вызывается с именем действия при КАЖДОМ реальном
+# нажатии (после того как клавиша отправлена). GUI подписывается на него,
+# чтобы показывать ленту действий. По умолчанию None — CLI-режим не трогает.
+on_action = None
+
 
 def cooldown_remaining(action_name):
     """Сколько ещё секунд ждать до готовности действия (0.0 — готово)."""
@@ -69,6 +74,11 @@ def press_action(action_name, respect_cooldown=True):
         return False
     press_key(key)
     _last_action_ts[action_name] = time.monotonic()
+    if on_action is not None:
+        try:
+            on_action(action_name)
+        except Exception:
+            pass  # GUI-логгер не должен ронять бота
     return True
 
 
