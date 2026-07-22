@@ -80,7 +80,8 @@ class BotFSM:
     def _enter_combat(self, now):
         self.state = COMBAT
         self._combat_started = now
-        # запускаем автоатаку — один раз при взятии цели (бьётся до смерти).
+        # человеческая реакция + запуск автоатаки (один раз, бьётся до смерти).
+        ctl.reaction_delay()
         ctl.press_action("attack", respect_cooldown=False)
 
     def _on_combat(self, target_present, now):

@@ -24,7 +24,9 @@ import keyboard
 import config
 from capture.screen import ScreenCapture
 from logic.fsm import BotFSM
+from logic.humanize import BreakScheduler
 from control import input_ctl as ctl
+from vision import bars
 
 # Человекочитаемые подписи действий для ленты.
 ACTION_LABELS = {
@@ -81,20 +83,44 @@ class BotWorker(threading.Thread):
             return
 
         self.q.put(("log", "Бот работает."))
+        breaks = BreakScheduler(time.monotonic())
         try:
             with ScreenCapture() as cap:
                 while not self._stop.is_set():
                     if self._pause.is_set():
                         time.sleep(0.15)
                         continue
+                    mono = time.monotonic()
                     now = time.time()
                     frame = cap.grab()
+
+                    # активный перерыв: ждём, но следим за HP (урон -> выходим)
+                    if breaks.is_active():
+                        hp = bars.read_self_bars(frame).get("hp", 100.0) or 100.0
+                        if hp < config.HP_HEAL_THRESHOLD or breaks.remaining(mono) <= 0:
+                            breaks.end(mono)
+                            self.q.put(("resumed", None))
+                            self.q.put(("log", "— перерыв окончен, продолжаем —"))
+                        else:
+                            self.q.put(("break", int(breaks.remaining(mono))))
+                            time.sleep(0.4)
+                            continue
+
                     status = self.fsm.tick(frame, now)
                     self.q.put(("status", status))
                     if status["state"] != self._last_state:
                         self.q.put(("log", f"Состояние → {status['state']}"))
                         self._last_state = status["state"]
-                    time.sleep(config.LOOP_DELAY)
+
+                    # начать перерыв, если пора и сейчас безопасно
+                    if (config.BREAKS_ENABLED and breaks.due(mono)
+                            and status["state"] == "SEARCH" and not status["target"]
+                            and (status["hp"] or 0) >= config.BREAK_SAFE_HP):
+                        dur = breaks.start(mono)
+                        self.q.put(("log", f"— перерыв ~{int(dur)} c (человеческая пауза) —"))
+                        continue
+
+                    ctl.sleep(config.LOOP_DELAY)   # джиттер интервала цикла
         except Exception as e:  # failsafe pydirectinput и прочее
             self.q.put(("log", f"ОСТАНОВ: {type(e).__name__}: {e}"))
         finally:
@@ -244,6 +270,11 @@ class App:
             else:
                 self.pause_btn.config(text="⏸ Пауза")
                 self._append_log("— продолжаем —")
+        elif kind == "break":
+            self.status_var.set(f"ПЕРЕРЫВ · осталось {data} c")
+            self.banner.config(bg="#1565c0")
+        elif kind == "resumed":
+            pass  # следующий status вернёт баннер в рабочий вид
         elif kind == "stopped":
             self.status_var.set("ОСТАНОВЛЕН")
             self.banner.config(bg="#555")
