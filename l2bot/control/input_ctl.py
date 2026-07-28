@@ -26,6 +26,18 @@ _ready_at = {}
 # чтобы показывать ленту действий. По умолчанию None — CLI-режим не трогает.
 on_action = None
 
+# Необязательный колбэк для свободных сообщений в ленту (напр. визуальный клик).
+on_event = None
+
+
+def emit(message):
+    """Отправить свободное сообщение в ленту, если кто-то подписан."""
+    if on_event is not None:
+        try:
+            on_event(message)
+        except Exception:
+            pass
+
 
 def cooldown_remaining(action_name):
     """Сколько ещё секунд ждать до готовности действия (0.0 — готово)."""

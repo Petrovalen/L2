@@ -10,6 +10,7 @@ import numpy as np
 import pytesseract
 
 import config
+from logic import settings
 
 if config.TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = config.TESSERACT_CMD
@@ -99,5 +100,6 @@ def read_name(frame, region, trim=True):
 
 
 def read_target_name(frame):
-    """Прочитать имя выделенной цели из config.TARGET_NAME_REGION (частный случай)."""
-    return read_name(frame, config.TARGET_NAME_REGION)
+    """Прочитать имя выделенной цели из откалиброванной области (или из config)."""
+    region = settings.get("target_name_region") or config.TARGET_NAME_REGION
+    return read_name(frame, region)

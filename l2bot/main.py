@@ -18,6 +18,7 @@ import config
 from capture.screen import ScreenCapture
 from logic.fsm import BotFSM
 from logic.humanize import BreakScheduler
+from logic import settings
 from control import input_ctl as ctl
 from vision import bars
 
@@ -41,6 +42,7 @@ class BotRunner:
         print("[HOTKEY] СТОП")
 
     def run(self):
+        settings.apply_to_config()   # применить сохранённые настройки панели
         self._bind_hotkeys()
         print("Бот запущен. F11 — пауза, F12 — стоп.")
         print("Даю 3 секунды переключиться в окно игры...")

@@ -6,8 +6,10 @@
 Это надёжнее чем один пиксель и терпимо к антиалиасингу/градиенту.
 """
 import numpy as np
+import cv2
 
 import config
+from logic import settings
 
 
 def _to_frame_coords(x, y):
@@ -69,7 +71,7 @@ def _fill_ratio(frame, x1, x2, y, color, tol):
 
 
 def read_bar(frame, bar_cfg):
-    """Вернуть процент (0..100) для одной полоски по её конфигу."""
+    """Вернуть процент (0..100) для одной полоски по её конфигу (старый формат)."""
     ratio = _fill_ratio(
         frame,
         bar_cfg["x1"], bar_cfg["x2"], bar_cfg["y"],
@@ -78,11 +80,63 @@ def read_bar(frame, bar_cfg):
     return round(ratio * 100.0, 1)
 
 
+# ---------------------------------------------------------------------------
+# Калиброванные рамкой полоски (прямоугольная область + цвет), из settings.json.
+# Формат spec: {"left","top","width","height","color":[b,g,r],"tol"}.
+# Если полоска откалибрована в панели — используем её, иначе старый config.
+# ---------------------------------------------------------------------------
+def _region_density(frame, spec):
+    """Доля совпавших с цветом пикселей по высоте для каждого столбца области."""
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    x = spec["left"] - rgn["left"]
+    y = spec["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, x); y0 = max(0, y)
+    x1 = min(w, x + spec["width"]); y1 = min(h, y + spec["height"])
+    if x1 <= x0 or y1 <= y0:
+        return np.empty(0)
+    reg = frame[y0:y1, x0:x1, :].astype(np.int16)
+    color = np.array(spec["color"], dtype=np.int16)
+    tol = spec.get("tol", 60)
+    matched = np.all(np.abs(reg - color) <= tol, axis=2)
+    return matched.mean(axis=0)
+
+
+def detect_fill_color(frame, rect):
+    """
+    Определить цвет заливки полоски по обведённой области (полоска должна быть
+    ПОЛНОЙ). Берём медиану насыщенных ярких пикселей -> цвет заполнения (BGR).
+    """
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    x = rect["left"] - rgn["left"]; y = rect["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, x); y0 = max(0, y)
+    x1 = min(w, x + rect["width"]); y1 = min(h, y + rect["height"])
+    crop = frame[y0:y1, x0:x1]
+    if crop.size == 0:
+        return [0, 0, 0]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask = (hsv[:, :, 1] >= 60) & (hsv[:, :, 2] >= 60)   # насыщенные и яркие
+    px = crop[mask] if np.count_nonzero(mask) >= 10 else crop.reshape(-1, 3)
+    med = np.median(px.reshape(-1, 3), axis=0)
+    return [int(med[0]), int(med[1]), int(med[2])]
+
+
+def _bar_spec(name):
+    """Взять калиброванную рамку полоски из settings (или None)."""
+    return settings.get("bar_" + name)
+
+
 def read_self_bars(frame):
-    """HP/MP/CP персонажа в процентах. Возвращает dict."""
+    """HP/MP/CP персонажа в процентах. Калиброванные рамки в приоритете."""
     result = {}
-    for name, cfg in config.BARS.items():
-        result[name] = read_bar(frame, cfg)
+    for name in ("hp", "mp", "cp"):
+        spec = _bar_spec(name)
+        if spec:
+            result[name] = round(_fill_edge(_region_density(frame, spec)) * 100.0, 1)
+        else:
+            cfg = config.BARS.get(name)
+            result[name] = read_bar(frame, cfg) if cfg else 0.0
     return result
 
 
@@ -90,18 +144,30 @@ def has_target(frame):
     """
     Есть ли выбранная живая цель. Возвращает (present, target_hp_percent).
 
-    Наличие определяем по красному в ЛЕВОЙ части полоски цели: настоящая
-    полоска начинается от левого края (x1), а случайный красный в окружении
-    (справа в области) полоску не образует. Так уходит ложное срабатывание,
-    когда позади области полоски цели попадаются красные детали сцены.
+    Наличие — по красному в ЛЕВОЙ части полоски цели (реальная полоска начинается
+    слева; случайный цвет справа полоску не образует).
     """
-    cfg = config.TARGET_BAR
-    col_density = _column_density(frame, cfg["x1"], cfg["x2"], cfg["y"],
-                                  cfg["color"], cfg["tol"])
+    spec = _bar_spec("target")
+    if spec:
+        col_density = _region_density(frame, spec)
+    else:
+        cfg = config.TARGET_BAR
+        col_density = _column_density(frame, cfg["x1"], cfg["x2"], cfg["y"],
+                                      cfg["color"], cfg["tol"])
     if col_density.size == 0:
         return False, 0.0
-    left_k = max(1, int(col_density.size * _TARGET_LEFT_FRAC))
-    left_red = float((col_density[:left_k] >= _COL_DENSE_MIN).mean())
-    if left_red < config.TARGET_PRESENT_MIN:
+    # длиннейший непрерывный участок красного (реальная полоска — сплошной
+    # отрезок; иконки слева и разрозненный красный окружения его не образуют).
+    dense = col_density >= _COL_DENSE_MIN
+    longest = cur = 0
+    for v in dense:
+        if v:
+            cur += 1
+            if cur > longest:
+                longest = cur
+        else:
+            cur = 0
+    if longest / dense.size < config.TARGET_PRESENT_MIN:
         return False, 0.0
+    # HP цели — по правому краю заливки (иконки слева на это не влияют).
     return True, round(_fill_edge(col_density) * 100.0, 1)

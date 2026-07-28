@@ -9,6 +9,8 @@ venv/
 l2bot/calibration_result.txt
 # Белый список мобов — пользовательские данные под конкретную локацию
 l2bot/mobs.json
+# Пользовательские настройки панели (зона поиска и т.п.)
+l2bot/settings.json
 
 # ОС
 .DS_Store

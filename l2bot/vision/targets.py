@@ -7,11 +7,141 @@
 как прокси к "ближайший к персонажу".
 """
 import os
+import difflib
 
 import cv2
 import numpy as np
 
 import config
+from vision import ocr
+
+# Ядро для склейки букв ника в единый блок (горизонтальное «размазывание»).
+_NAME_DILATE = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 3))
+
+
+def _match_name(text, wanted_lower):
+    """Совпадает ли распознанный text с одним из имён белого списка."""
+    t = text.lower().strip()
+    if not t:
+        return None
+    for orig, low in wanted_lower:
+        if t == low or low in t or t in low:
+            return orig
+        if difflib.SequenceMatcher(None, t, low).ratio() >= config.NAME_MATCH_RATIO:
+            return orig
+    return None
+
+
+def name_in_list(text, names):
+    """True, если распознанное имя text похоже на одно из имён белого списка."""
+    return _match_name(text, [(n, n.lower()) for n in names]) is not None
+
+
+def scan_nameplates(frame, region, names=None):
+    """
+    Найти ВСЕ таблички имён в области `region`, распознать и (если задан
+    белый список names) отметить совпавшие. Для детекции и отладочной отрисовки.
+
+    Возвращает список, отсортированный по близости к центру экрана:
+        [{"box": (left, top, w, h),   # прямоугольник ника в координатах экрана
+          "text": распознанный_текст,
+          "name": имя_из_списка_или_None,   # None = не из белого списка
+          "x", "y": точка клика (центр по X, чуть ниже — тело моба)}, ...]
+    """
+    if not region:
+        return []
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    ox = region["left"] - rgn["left"]
+    oy = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, ox); y0 = max(0, oy)
+    x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return []
+
+    sub = frame[y0:y1, x0:x1]
+    gray = cv2.cvtColor(sub, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray, config.NAME_BRIGHT, 255, cv2.THRESH_BINARY)
+    dil = cv2.dilate(mask, _NAME_DILATE, iterations=1)
+    num, _lbl, stats, _cent = cv2.connectedComponentsWithStats(dil, connectivity=8)
+
+    fh, fw = mask.shape
+    scr_cx, scr_cy = w / 2.0, h / 2.0     # центр экрана ≈ позиция персонажа
+    wanted_lower = [(n, n.lower()) for n in (names or [])]
+    out = []
+    for i in range(1, num):
+        bx, by, bw, bh, _area = stats[i]
+        # форма таблички: горизонтальная, разумного размера
+        if bh < 6 or bh > 40 or bw < 12 or bw > 500 or bw < bh:
+            continue
+        pad = 3
+        scr = {
+            "left": region["left"] + max(0, bx - pad),
+            "top": region["top"] + max(0, by - pad),
+            "width": min(fw, bx + bw + pad) - max(0, bx - pad),
+            "height": min(fh, by + bh + pad) - max(0, by - pad),
+        }
+        text = ocr.read_name(frame, scr, trim=False)
+        matched = _match_name(text, wanted_lower) if wanted_lower else None
+        left = region["left"] + bx
+        top = region["top"] + by
+        cx = left + bw // 2
+        cy = top + bh + config.NAME_CLICK_DY
+        out.append({
+            "box": (left, top, int(bw), int(bh)),
+            "text": text, "name": matched,
+            "x": cx, "y": cy,
+            "_d": (cx - scr_cx) ** 2 + (cy - scr_cy) ** 2,
+        })
+    out.sort(key=lambda d: d["_d"])
+    return out
+
+
+def find_named_mobs(frame, names, region):
+    """
+    Ники мобов из белого списка на экране, ближайшие к центру — первыми:
+        [{"x": screen_x, "y": screen_y, "name": имя}, ...]
+    """
+    if not names or not region:
+        return []
+    return [{"x": d["x"], "y": d["y"], "name": d["name"]}
+            for d in scan_nameplates(frame, region, names) if d["name"]]
+
+
+def boxes_in_crop(crop, off_left, off_top):
+    """
+    Найти боксы ников в УЖЕ вырезанной области `crop` (BGR). Быстро, без OCR.
+    off_left/off_top — экранные координаты левого-верхнего угла кропа.
+    Возврат: [(left, top, w, h), ...] в координатах экрана.
+    """
+    if crop is None or crop.size == 0:
+        return []
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    _, mask = cv2.threshold(gray, config.NAME_BRIGHT, 255, cv2.THRESH_BINARY)
+    dil = cv2.dilate(mask, _NAME_DILATE, iterations=1)
+    num, _lbl, stats, _cent = cv2.connectedComponentsWithStats(dil, connectivity=8)
+    boxes = []
+    for i in range(1, num):
+        bx, by, bw, bh, _area = stats[i]
+        if bh < 6 or bh > 40 or bw < 12 or bw > 500 or bw < bh:
+            continue
+        boxes.append((off_left + int(bx), off_top + int(by), int(bw), int(bh)))
+    return boxes
+
+
+def scan_nameplate_boxes(frame, region):
+    """Боксы ников (без OCR) на полном кадре, координаты экрана."""
+    if not region:
+        return []
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    ox = region["left"] - rgn["left"]
+    oy = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, ox); y0 = max(0, oy)
+    x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return []
+    return boxes_in_crop(frame[y0:y1, x0:x1], region["left"], region["top"])
 
 # Кэш загруженных шаблонов: путь -> grayscale-массив.
 _template_cache = {}
