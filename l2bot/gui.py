@@ -25,8 +25,9 @@ import config
 from capture.screen import ScreenCapture
 from logic.fsm import BotFSM
 from logic.humanize import BreakScheduler
+from logic import mob_list
 from control import input_ctl as ctl
-from vision import bars
+from vision import bars, ocr
 
 # Человекочитаемые подписи действий для ленты.
 ACTION_LABELS = {
@@ -150,8 +151,8 @@ class App:
         self._hotkeys = []
 
         root.title("l2bot — панель управления")
-        root.geometry("460x560")
-        root.minsize(420, 480)
+        root.geometry("460x680")
+        root.minsize(420, 600)
 
         # --- баннер статуса ---
         self.status_var = tk.StringVar(value="ОСТАНОВЛЕН")
@@ -190,6 +191,23 @@ class App:
 
         tk.Label(root, text="F11 — пауза · F12 — стоп (работают и поверх игры)",
                  font=("Segoe UI", 8), fg="#666").pack()
+
+        # --- белый список мобов ---
+        mobframe = ttk.LabelFrame(root, text="Мои мобы (кого бить)")
+        mobframe.pack(fill="x", padx=10, pady=6)
+        row = tk.Frame(mobframe)
+        row.pack(fill="x", padx=6, pady=4)
+        self.add_btn = tk.Button(row, text="＋ Добавить моба (рамкой)",
+                                 command=self.add_mob)
+        self.add_btn.pack(side="left")
+        self.del_btn = tk.Button(row, text="Удалить", command=self.remove_mob)
+        self.del_btn.pack(side="left", padx=4)
+        self.mob_status = tk.StringVar(value="")
+        tk.Label(mobframe, textvariable=self.mob_status, font=("Segoe UI", 8),
+                 fg="#1565c0", anchor="w").pack(fill="x", padx=8)
+        self.mob_listbox = tk.Listbox(mobframe, height=4, font=("Consolas", 9))
+        self.mob_listbox.pack(fill="x", padx=6, pady=4)
+        self._refresh_mobs()
 
         # --- лента действий ---
         logframe = ttk.LabelFrame(root, text="Действия бота")
@@ -237,6 +255,83 @@ class App:
         if self.worker:
             self.worker.stop()
         self._unregister_hotkeys()
+
+    # --- белый список мобов ---
+    def _refresh_mobs(self):
+        self.mob_listbox.delete(0, "end")
+        for n in mob_list.load():
+            self.mob_listbox.insert("end", n)
+
+    def add_mob(self):
+        """Открыть полупрозрачный оверлей: обведи рамкой ник моба в игре."""
+        ov = tk.Toplevel(self.root)
+        ov.attributes("-fullscreen", True)
+        ov.attributes("-alpha", 0.3)
+        ov.attributes("-topmost", True)
+        ov.configure(cursor="crosshair")
+        canvas = tk.Canvas(ov, highlightthickness=0, bg="gray15")
+        canvas.pack(fill="both", expand=True)
+        canvas.create_text(ov.winfo_screenwidth() // 2, 28, fill="white",
+                           font=("Segoe UI", 14, "bold"),
+                           text="Обведи рамкой ник моба   (ЛКМ — растянуть, Esc — отмена)")
+        st = {"lx": 0, "ly": 0, "rx": 0, "ry": 0, "rect": None}
+
+        def on_press(e):
+            st["lx"], st["ly"] = e.x, e.y          # локальные — для рисунка
+            st["rx"], st["ry"] = e.x_root, e.y_root  # экранные — для захвата
+            st["rect"] = canvas.create_rectangle(e.x, e.y, e.x, e.y,
+                                                 outline="yellow", width=2)
+
+        def on_drag(e):
+            if st["rect"] is not None:
+                canvas.coords(st["rect"], st["lx"], st["ly"], e.x, e.y)
+
+        def on_release(e):
+            left, top = min(st["rx"], e.x_root), min(st["ry"], e.y_root)
+            w, h = abs(e.x_root - st["rx"]), abs(e.y_root - st["ry"])
+            ov.destroy()
+            if w < 5 or h < 5:
+                self.mob_status.set("Слишком маленькая рамка — отмена.")
+                return
+            # даём оверлею исчезнуть с экрана перед захватом
+            self.root.after(150, lambda: self._read_boxed_name(left, top, w, h))
+
+        def on_cancel(_):
+            ov.destroy()
+            self.mob_status.set("Добавление отменено.")
+
+        canvas.bind("<Button-1>", on_press)
+        canvas.bind("<B1-Motion>", on_drag)
+        canvas.bind("<ButtonRelease-1>", on_release)
+        ov.bind("<Escape>", on_cancel)
+        ov.focus_force()
+
+    def _read_boxed_name(self, left, top, w, h):
+        name = ""
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+            name = ocr.read_name(frame, {"left": left, "top": top,
+                                         "width": w, "height": h})
+        except Exception as e:
+            self._append_log(f"[!] Ошибка чтения имени: {e}")
+        if name:
+            mob_list.add(name)
+            self._refresh_mobs()
+            self.mob_status.set(f"Добавлен: {name}")
+            self._append_log(f"Добавлен моб: {name}")
+        else:
+            self.mob_status.set("В рамке не распознан текст — попробуй точнее.")
+
+    def remove_mob(self):
+        sel = self.mob_listbox.curselection()
+        if not sel:
+            self.mob_status.set("Выберите имя в списке для удаления.")
+            return
+        name = self.mob_listbox.get(sel[0])
+        mob_list.remove(name)
+        self._refresh_mobs()
+        self.mob_status.set(f"Удалён: {name}")
 
     # --- горячие клавиши ---
     def _register_hotkeys(self):
