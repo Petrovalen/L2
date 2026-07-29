@@ -5,11 +5,14 @@
 тех, что близки к "цвету заполнения". Доля * 100 = процент полоски.
 Это надёжнее чем один пиксель и терпимо к антиалиасингу/градиенту.
 """
+import time
+
 import numpy as np
 import cv2
 
 import config
 from logic import settings
+from vision import ocr
 
 
 def _to_frame_coords(x, y):
@@ -127,11 +130,73 @@ def _bar_spec(name):
     return settings.get("bar_" + name)
 
 
+# ---------------------------------------------------------------------------
+# Режим «цифры»: числа вшиты в сам бар (формат «тек/макс», напр. 2186/2186),
+# поэтому OCR читает ИЗ ТОЙ ЖЕ области, что калибруется под бар (bar_<name>).
+# Процент = тек/макс × 100. Максимум берётся авто из «тек/макс»; если на баре
+# видно только текущее — можно задать ручной Max.
+# Конфиг в settings: bar_<name>_digits = {"enabled": bool, "max": N|0}.
+# OCR медленный, поэтому троттлим и кэшируем результат на DIGIT_OCR_INTERVAL.
+# ---------------------------------------------------------------------------
+_digit_cache = {}       # name -> (mono_time, percent|None)
+_last_ocr_mono = 0.0    # момент последнего OCR любого бара (глобальный стаггер)
+
+
+def _digit_percent(frame, name, region, max_manual):
+    """
+    Процент (0..100) полоски по числам из OCR (из области бара `region`),
+    с троттлингом и кэшем. None — если распознать/посчитать не удалось (тогда
+    вызывающий откатится на пиксельный режим).
+
+    Два ограничителя нагрузки (OCR = запуск процесса Tesseract, дорого):
+      * на каждый бар — не чаще DIGIT_OCR_INTERVAL (кэш между чтениями);
+      * глобально — не больше ОДНОГО распознавания за DIGIT_OCR_MIN_GAP, чтобы
+        включённые сразу несколько баров не читались в одном тике и не топили
+        цикл. Бары естественно распознаются по очереди (round-robin).
+    """
+    global _last_ocr_mono
+    now = time.monotonic()
+    prev = _digit_cache.get(name)
+    if prev and now - prev[0] < config.DIGIT_OCR_INTERVAL:
+        return prev[1]
+    if now - _last_ocr_mono < config.DIGIT_OCR_MIN_GAP:
+        return prev[1] if prev else None     # в этот тик уже читался другой бар
+    _last_ocr_mono = now
+    percent = None
+    try:
+        parsed = ocr.read_number(frame, region)
+    except Exception:
+        parsed = None                        # сбой OCR не должен ронять цикл бота
+    if parsed is not None:
+        cur, mx = parsed
+        max_val = mx or max_manual or 0          # авто «тек/макс», иначе ручной Max
+        if cur is not None and max_val:
+            percent = round(max(0.0, min(100.0, cur / max_val * 100.0)), 1)
+    value = percent if percent is not None else (prev[1] if prev else None)
+    _digit_cache[name] = (now, value)
+    return value
+
+
+def _digit_on(name):
+    """Конфиг режима цифр, если он включён для бара (иначе None)."""
+    d = settings.get("bar_%s_digits" % name)
+    return d if (d and d.get("enabled")) else None
+
+
 def read_self_bars(frame):
-    """HP/MP/CP персонажа в процентах. Калиброванные рамки в приоритете."""
+    """
+    HP/MP/CP персонажа в процентах. Приоритет: режим цифр (OCR) -> калиброванная
+    рамка (пиксели) -> старый config. Если цифры не прочитались — откат на пиксели.
+    """
     result = {}
     for name in ("hp", "mp", "cp"):
         spec = _bar_spec(name)
+        don = _digit_on(name)
+        if don and spec:                 # числа читаем из области самого бара
+            val = _digit_percent(frame, name, spec, don.get("max"))
+            if val is not None:
+                result[name] = val
+                continue                 # цифры прочитались — берём их
         if spec:
             result[name] = round(_fill_edge(_region_density(frame, spec)) * 100.0, 1)
         else:
@@ -169,5 +234,11 @@ def has_target(frame):
             cur = 0
     if longest / dense.size < config.TARGET_PRESENT_MIN:
         return False, 0.0
-    # HP цели — по правому краю заливки (иконки слева на это не влияют).
+    # HP цели: если включён режим цифр и число прочиталось — берём его (из
+    # области бара цели); иначе по правому краю заливки.
+    don = _digit_on("target")
+    if don and spec:
+        val = _digit_percent(frame, "target", spec, don.get("max"))
+        if val is not None:
+            return True, val
     return True, round(_fill_edge(col_density) * 100.0, 1)

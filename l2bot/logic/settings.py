@@ -17,6 +17,14 @@ _CONFIG_OVERRIDES = {
     "name_click_dy": "NAME_CLICK_DY",
     "vision_interval": "VISION_INTERVAL",
     "target_name_filter": "TARGET_NAME_FILTER",
+    "camera_search": "CAMERA_SEARCH",
+    "search_camera_after": "SEARCH_CAMERA_AFTER",
+    "camera_interval": "CAMERA_INTERVAL",
+    "camera_drag_distance": "CAMERA_DRAG_DISTANCE",
+    "camera_step_duration": "CAMERA_STEP_DURATION",
+    "camera_arc": "CAMERA_ARC",
+    "camera_settle": "CAMERA_SETTLE",
+    "hotkey_stop": "HOTKEY_STOP",
 }
 
 
@@ -50,3 +58,12 @@ def apply_to_config():
     for key, attr in _CONFIG_OVERRIDES.items():
         if key in data:
             setattr(config, attr, data[key])
+    # клавиши: сливаем с дефолтами, чтобы не терять действия, которых нет в файле
+    if isinstance(data.get("keys"), dict):
+        merged = dict(config.KEYS)
+        for k, v in data["keys"].items():
+            merged[k] = (v or None)          # пустая строка -> None (действие выкл.)
+        config.KEYS = merged
+    # способности: полный список из панели заменяет дефолтный
+    if isinstance(data.get("skills"), list):
+        config.SKILLS = data["skills"]

@@ -8,7 +8,9 @@
 
 Состояния:
   SEARCH  — цели нет. Ищем мобов, выбираем ближайшего (клавиша target_nearest
-            или клик по найденному шаблону).
+            или клик по найденному шаблону). Если цель не находится долго —
+            периодически поворачиваем камеру, чтобы в поле зрения попали новые
+            мобы (активный поиск, персонаж стоит на месте).
   COMBAT  — цель есть. Спамим атаку, пока цель жива и не вышел таймаут.
   LOOT    — цель умерла. Жмём pickup некоторое время, потом обратно в SEARCH.
 """
@@ -35,6 +37,7 @@ class BotFSM:
         self._acquire_lock_until = 0.0  # до этого времени не перевыбираем цель
         self._last_name_check = 0.0     # последняя проверка имени цели (фильтр)
         self._vision_pending = False    # после вижн-клика ждём подтверждения цели
+        self._last_camera = 0.0         # последний поворот камеры (активный поиск)
 
     # ---- вспомогательные проверки ---------------------------------------
     def _survival(self, self_bars):
@@ -60,7 +63,7 @@ class BotFSM:
         if self.state == SEARCH:
             self._on_search(frame, target_present, now)
         elif self.state == COMBAT:
-            self._on_combat(target_present, now)
+            self._on_combat(self_bars, target_present, target_hp, now)
         elif self.state == LOOT:
             self._on_loot(now)
 
@@ -110,6 +113,28 @@ class BotFSM:
             if self._vision_click(frame):
                 self._vision_pending = True
                 self._acquire_lock_until = now + config.ACQUIRE_LOCK
+                return
+        # 3) активный поиск: цель не находится долго -> поворот камеры, чтобы в
+        #    поле зрения попали новые мобы. Не крутим сразу после вижн-клика
+        #    (_vision_pending) — даём цели зарегистрироваться.
+        if (config.CAMERA_SEARCH and not self._vision_pending
+                and now - self._search_started > config.SEARCH_CAMERA_AFTER
+                and now - self._last_camera >= config.CAMERA_INTERVAL):
+            self._last_camera = now
+            ctl.emit("поворот камеры (поиск целей)")
+            ctl.camera_drag(config.CAMERA_DRAG_DISTANCE, center=self._camera_anchor())
+
+    def _camera_anchor(self):
+        """
+        Точка реколибровки курсора для поворота камеры — центр зоны поиска
+        мобов (search_region): она заведомо над игровым миром, а не над UI.
+        None -> camera_drag возьмёт центр экрана как запасной вариант.
+        """
+        region = settings.get("search_region")
+        if not region:
+            return None
+        return (region["left"] + region["width"] // 2,
+                region["top"] + region["height"] // 2)
 
     def _target_name_ok(self, frame):
         """Имя выбранной цели есть в белом списке? Пустой список/нечитаемо -> ок."""
@@ -127,11 +152,17 @@ class BotFSM:
         names = mob_list.load()
         if not region or not names:
             return False
-        mobs = targets.find_named_mobs(frame, names, region)
+        # Сначала — поиск по шаблонам ников (не срабатывает на траве). Если
+        # шаблонов нет/не совпали — откат на OCR-скан по яркому тексту.
+        mobs = targets.find_mobs_by_template(frame, names, region)
+        how = "шаблон"
+        if not mobs:
+            mobs = targets.find_named_mobs(frame, names, region)
+            how = "OCR"
         if not mobs:
             return False
         m = mobs[0]
-        ctl.emit(f"визуальный клик по '{m['name']}'")
+        ctl.emit(f"визуальный клик по '{m['name']}' ({how})")
         ctl.click(m["x"], m["y"])
         return True
 
@@ -143,7 +174,7 @@ class BotFSM:
         ctl.reaction_delay()
         ctl.press_action("attack", respect_cooldown=False)
 
-    def _on_combat(self, target_present, now):
+    def _on_combat(self, self_bars, target_present, target_hp, now):
         # Фиксируемся на цели: одиночные сбойные кадры (цель «мигнула») не
         # выкидывают из боя. В лут уходим, только если цель пропала стабильно
         # дольше TARGET_LOST_GRACE — тогда считаем её мёртвой.
@@ -160,13 +191,37 @@ class BotFSM:
         if now - self._combat_started > config.ATTACK_TIMEOUT:
             self._to_search(now)
             return
-        # доп. скилл прерывает автоатаку -> сразу после него возобновляем её.
-        if ctl.press_action("assist_skill"):
+        # способности: кастуем те, чьи условия (HP цели / своя MP) выполнены.
+        # Скилл прерывает автоатаку -> сразу после него возобновляем её.
+        if self._use_skills(self_bars, target_hp):
             ctl.press_action("attack", respect_cooldown=False)
         else:
             # страховка: если автоатака оборвалась — переначинаем изредка
             # (интервал = кулдаун 'attack'). Спама атаки каждый тик больше нет.
             ctl.press_action("attack")
+
+    def _use_skills(self, self_bars, target_hp):
+        """
+        Пройтись по списку способностей и нажать те, у кого выполнены условия:
+          HP цели <= target_hp_max  И  моя MP >= mp_min  (и вышел кулдаун).
+        Вернуть True, если хоть одна способность реально применена.
+        """
+        mp = self_bars.get("mp")
+        mp = 100.0 if mp is None else mp
+        thp = 100.0 if target_hp is None else target_hp
+        used = False
+        for i, sk in enumerate(config.SKILLS):
+            if not sk.get("enabled", True) or not sk.get("key"):
+                continue
+            if thp > sk.get("target_hp_max", 100):
+                continue
+            if mp < sk.get("mp_min", 0):
+                continue
+            if ctl.press_skill("skill_%d" % i, sk["key"], sk.get("cooldown", 4.0)):
+                ctl.emit("скилл '%s' (клавиша '%s')"
+                         % (sk.get("label", "скилл"), sk["key"]))
+                used = True
+        return used
 
     def _on_loot(self, now):
         ctl.press_action("pickup")

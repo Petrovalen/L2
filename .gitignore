@@ -11,6 +11,8 @@ l2bot/calibration_result.txt
 l2bot/mobs.json
 # Пользовательские настройки панели (зона поиска и т.п.)
 l2bot/settings.json
+# Снимки-шаблоны ников мобов — генерируются, зависят от разрешения/локации
+l2bot/target_templates/
 
 # ОС
 .DS_Store
