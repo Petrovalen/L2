@@ -34,6 +34,7 @@ from vision import bars, ocr, targets
 # Человекочитаемые подписи действий для ленты.
 ACTION_LABELS = {
     "target_nearest": "выбор цели",
+    "next_target": "следующая цель",
     "attack": "атака",
     "heal_potion": "хилка",
     "mana_potion": "мана",
@@ -41,17 +42,18 @@ ACTION_LABELS = {
 }
 
 # Действия с настраиваемой клавишей и их подписи в редакторе (порядок сохранён).
+# Лечение/банки вынесены в отдельный блок «Лечение».
 KEY_ACTIONS = [
-    ("target_nearest", "Выбор цели (некст-таргет)"),
+    ("target_nearest", "Выбор цели (ближайшая)"),
+    ("next_target", "Следующая цель (перебор — обход застрявшей)"),
     ("attack", "Атака / основной скилл"),
-    ("heal_potion", "Хилка (зелье HP)"),
-    ("mana_potion", "Мана (зелье MP)"),
     ("pickup", "Подобрать лут"),
 ]
 
 # Дефолт новой способности при добавлении в редакторе.
 DEFAULT_SKILL = {"key": "", "label": "Скилл", "cooldown": 4.0,
-                 "target_hp_max": 100, "mp_min": 0, "enabled": True}
+                 "target_hp_above": 0, "target_hp_below": 100, "mp_min": 0,
+                 "once": False, "enabled": True}
 
 WARMUP_SEC = 3          # пауза перед стартом — успеть переключиться в игру
 MAX_LOG_LINES = 500     # ограничение размера ленты
@@ -169,6 +171,8 @@ class App:
         self._hotkeys = []
         self.debug_overlay = None       # прозрачный оверлей с рамками мобов
         self.debug_canvas = None
+        self.zones_overlay = None        # прозрачный оверлей выделенных зон
+        self.zones_canvas = None
         self._overlay_stop = threading.Event()
 
         settings.apply_to_config()   # применить сохранённые настройки панели
@@ -305,6 +309,10 @@ class App:
         tk.Checkbutton(setframe, text="Показывать рамки мобов (отладка)",
                        variable=self.debug_var,
                        command=self._toggle_debug_overlay).pack(anchor="w", padx=6)
+        self.zones_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(setframe, text="Показывать выделенные зоны (отладка)",
+                       variable=self.zones_var,
+                       command=self._toggle_zones_overlay).pack(anchor="w", padx=6)
         r1 = tk.Frame(setframe)
         r1.pack(fill="x", padx=6)
         tk.Label(r1, text="Смещение клика, px", width=18, anchor="w").pack(side="left")
@@ -503,6 +511,19 @@ class App:
         self.mob_status.set(f"Точка персонажа задана: центр ({cx},{cy})")
         self._append_log(f"Точка персонажа (отсчёт ближайшего моба): ({cx},{cy})")
 
+    def set_buff_region(self):
+        self._select_region(
+            "Обведи ЗОНУ панели баффов (где иконки баффов персонажа)   Esc — отмена",
+            self._save_buff_region)
+
+    def _save_buff_region(self, left, top, w, h):
+        settings.set("buff_region",
+                     {"left": left, "top": top, "width": w, "height": h})
+        msg = f"Зона баффов задана: {w}x{h} @ ({left},{top})"
+        if getattr(self, "_ctrl_status", None) is not None:
+            self._ctrl_status.set(msg)
+        self._append_log(msg)
+
     def _read_boxed_name(self, left, top, w, h):
         name = ""
         try:
@@ -585,7 +606,8 @@ class App:
         win = tk.Toplevel(self.root)
         self._ctrl_win = win
         win.title("Клавиши и способности")
-        win.geometry("600x640")
+        win.geometry("600x860")
+        win.minsize(560, 600)
         win.transient(self.root)
 
         def on_close():
@@ -607,24 +629,33 @@ class App:
         tk.Label(kf, text="Пусто = действие отключено.", font=("Segoe UI", 8),
                  fg="#666", anchor="w").pack(fill="x", padx=10, pady=(0, 4))
 
-        # --- способности ---
-        sf = ttk.LabelFrame(win, text="Способности в бою (кастуются при условиях)")
-        sf.pack(fill="both", expand=True, padx=10, pady=6)
-        hint = ("HP цели ≤ — кастовать, пока HP цели не выше этого % (100 = всегда).\n"
-                "MP ≥ — кастовать, только если своя MP не ниже этого % (0 = без условия).\n"
-                "КД — не чаще раза в столько секунд.")
+        # --- лечение / банки (выживание, работает в любом состоянии) ---
+        hf = ttk.LabelFrame(win, text="Лечение (пить при падении своего HP/MP)")
+        hf.pack(fill="x", padx=10, pady=6)
+        self._heal_vars = self._potion_to_vars(config.HEAL, "hp_percent")
+        self._mppot_vars = self._potion_to_vars(config.MP_POTION, "mp_percent")
+        self._render_potion_row(hf, "HP-банка", self._heal_vars, "HP <", "%")
+        self._render_potion_row(hf, "MP-банка", self._mppot_vars, "MP <", "%")
+
+        # --- способности (боевая ротация: порядок сверху вниз = приоритет) ---
+        sf = ttk.LabelFrame(win, text="Ротация в бою (порядок сверху вниз = приоритет)")
+        sf.pack(fill="x", padx=10, pady=6)
+        hint = ("Каждый тик кастуется ПЕРВАЯ подходящая способность, между ними — автоатака.\n"
+                "HP цели от…до — каст только если HP цели в этом диапазоне % (0…100 = всегда).\n"
+                "MP ≥ — только если своя MP не ниже % (0 = без условия).  КД — не чаще раза в с.\n"
+                "«раз» — применить один раз за цель (для стартовых скиллов последовательности).")
         tk.Label(sf, text=hint, font=("Segoe UI", 8), fg="#1565c0",
                  justify="left", anchor="w").pack(fill="x", padx=8, pady=(4, 2))
 
         head = tk.Frame(sf)
         head.pack(fill="x", padx=8)
-        for text, w in (("вкл", 4), ("Клавиша", 9), ("HP цели ≤", 10),
-                        ("MP ≥", 7), ("КД, с", 7), ("", 8)):
+        for text, w in (("вкл", 3), ("Клав", 6), ("HP от", 6), ("HP до", 6),
+                        ("MP ≥", 6), ("КД", 5), ("раз", 4), ("", 10)):
             tk.Label(head, text=text, width=w, anchor="w",
-                     font=("Segoe UI", 8, "bold")).pack(side="left", padx=2)
+                     font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
 
         self._skills_box = tk.Frame(sf)
-        self._skills_box.pack(fill="both", expand=True, padx=4)
+        self._skills_box.pack(fill="x", padx=4)
 
         # текущие способности -> редактируемые строки (глубокая копия значений)
         self._skill_vars = []
@@ -634,6 +665,29 @@ class App:
 
         tk.Button(sf, text="＋ Добавить способность",
                   command=self._add_skill_row).pack(anchor="w", padx=8, pady=4)
+
+        # --- самобаффы (поддерживаются ВНЕ боя по иконке в панели баффов) ---
+        bf = ttk.LabelFrame(win, text="Баффы (держать на персонаже, вне боя)")
+        bf.pack(fill="x", padx=10, pady=6)
+        tk.Button(bf, text="Зона панели баффов",
+                  command=self.set_buff_region).pack(anchor="w", padx=8, pady=(4, 0))
+        bhint = ("Имя — подпись/файл иконки. «Иконка» — обведи иконку баффа в панели.\n"
+                 "Если иконки нет в зоне — бафф считается спавшим и накладывается.")
+        tk.Label(bf, text=bhint, font=("Segoe UI", 8), fg="#1565c0",
+                 justify="left", anchor="w").pack(fill="x", padx=8, pady=(2, 2))
+        bhead = tk.Frame(bf)
+        bhead.pack(fill="x", padx=8)
+        for text, w in (("вкл", 3), ("Имя", 14), ("Клав", 6), ("КД", 5), ("", 14)):
+            tk.Label(bhead, text=text, width=w, anchor="w",
+                     font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
+        self._buffs_box = tk.Frame(bf)
+        self._buffs_box.pack(fill="x", padx=4)
+        self._buff_vars = []
+        for b in config.BUFFS:
+            self._buff_vars.append(self._buff_to_vars(b))
+        self._render_buff_rows()
+        tk.Button(bf, text="＋ Добавить бафф",
+                  command=self._add_buff_row).pack(anchor="w", padx=8, pady=4)
 
         # --- статус + кнопки ---
         self._ctrl_status = tk.StringVar(value="")
@@ -647,14 +701,96 @@ class App:
         tk.Button(btns, text="Закрыть", command=on_close).pack(
             side="left", expand=True, fill="x", padx=2)
 
+    # --- банки (HP/MP) ---
+    def _potion_to_vars(self, cfg, pct_key):
+        return {
+            "enabled": tk.BooleanVar(value=bool(cfg.get("enabled"))),
+            "key": tk.StringVar(value=str(cfg.get("key") or "")),
+            "pct": tk.IntVar(value=int(cfg.get(pct_key, 0))),
+            "cooldown": tk.DoubleVar(value=float(cfg.get("cooldown", 3.0))),
+        }
+
+    def _render_potion_row(self, parent, title, v, pct_label, pct_suffix):
+        row = tk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=2)
+        tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left")
+        tk.Label(row, text=title, width=9, anchor="w").pack(side="left")
+        tk.Label(row, text="клавиша").pack(side="left")
+        tk.Entry(row, textvariable=v["key"], width=5).pack(side="left", padx=(2, 8))
+        tk.Label(row, text=pct_label).pack(side="left")
+        tk.Spinbox(row, from_=1, to=99, textvariable=v["pct"], width=4).pack(side="left")
+        tk.Label(row, text=pct_suffix + "   КД").pack(side="left")
+        tk.Spinbox(row, from_=0.0, to=120.0, increment=0.5,
+                   textvariable=v["cooldown"], width=5).pack(side="left", padx=2)
+
     def _skill_to_vars(self, sk):
+        below = sk.get("target_hp_below", sk.get("target_hp_max", 100))
         return {
             "enabled": tk.BooleanVar(value=bool(sk.get("enabled", True))),
             "key": tk.StringVar(value=str(sk.get("key") or "")),
-            "target_hp_max": tk.IntVar(value=int(sk.get("target_hp_max", 100))),
+            "target_hp_above": tk.IntVar(value=int(sk.get("target_hp_above", 0))),
+            "target_hp_below": tk.IntVar(value=int(below)),
             "mp_min": tk.IntVar(value=int(sk.get("mp_min", 0))),
             "cooldown": tk.DoubleVar(value=float(sk.get("cooldown", 4.0))),
+            "once": tk.BooleanVar(value=bool(sk.get("once", False))),
         }
+
+    # --- самобаффы ---
+    def _buff_to_vars(self, b):
+        return {
+            "enabled": tk.BooleanVar(value=bool(b.get("enabled", True))),
+            "label": tk.StringVar(value=str(b.get("label") or "")),
+            "key": tk.StringVar(value=str(b.get("key") or "")),
+            "cooldown": tk.DoubleVar(value=float(b.get("cooldown", 3.0))),
+        }
+
+    def _add_buff_row(self):
+        self._buff_vars.append(self._buff_to_vars({"label": "", "key": ""}))
+        self._render_buff_rows()
+
+    def _del_buff_row(self, idx):
+        if 0 <= idx < len(self._buff_vars):
+            self._buff_vars.pop(idx)
+            self._render_buff_rows()
+
+    def _render_buff_rows(self):
+        for w in self._buffs_box.winfo_children():
+            w.destroy()
+        for idx, v in enumerate(self._buff_vars):
+            row = tk.Frame(self._buffs_box)
+            row.pack(fill="x", pady=1)
+            tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["label"], width=14).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["key"], width=6).pack(side="left", padx=1)
+            tk.Spinbox(row, from_=0.0, to=600.0, increment=0.5,
+                       textvariable=v["cooldown"], width=5).pack(side="left", padx=1)
+            tk.Button(row, text="Иконка", width=7,
+                      command=lambda i=idx: self._capture_buff_icon(i)).pack(side="left", padx=1)
+            tk.Button(row, text="✕", width=2,
+                      command=lambda i=idx: self._del_buff_row(i)).pack(side="left")
+
+    def _capture_buff_icon(self, idx):
+        if not (0 <= idx < len(self._buff_vars)):
+            return
+        label = self._buff_vars[idx]["label"].get().strip()
+        if not label:
+            self._ctrl_status.set("Сначала впиши имя баффа (для файла иконки).")
+            return
+        self._select_region(
+            f"Обведи ИКОНКУ баффа «{label}» в панели баффов   Esc — отмена",
+            lambda l, t, w, h: self._save_buff_icon(label, l, t, w, h))
+
+    def _save_buff_icon(self, label, left, top, w, h):
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+            ok = targets.save_buff_template(
+                frame, {"left": left, "top": top, "width": w, "height": h}, label)
+        except Exception as e:
+            self._ctrl_status.set(f"Ошибка захвата иконки: {e}")
+            return
+        self._ctrl_status.set(f"Иконка баффа «{label}» сохранена ({w}x{h})."
+                              if ok else "Иконку сохранить не удалось.")
 
     def _add_skill_row(self):
         self._skill_vars.append(self._skill_to_vars(DEFAULT_SKILL))
@@ -665,52 +801,105 @@ class App:
             self._skill_vars.pop(idx)
             self._render_skill_rows()
 
+    def _move_skill_row(self, idx, delta):
+        j = idx + delta
+        if 0 <= idx < len(self._skill_vars) and 0 <= j < len(self._skill_vars):
+            self._skill_vars[idx], self._skill_vars[j] = \
+                self._skill_vars[j], self._skill_vars[idx]
+            self._render_skill_rows()
+
     def _render_skill_rows(self):
         for w in self._skills_box.winfo_children():
             w.destroy()
+        n = len(self._skill_vars)
         for idx, v in enumerate(self._skill_vars):
             row = tk.Frame(self._skills_box)
             row.pack(fill="x", pady=1)
-            tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left", padx=2)
-            tk.Entry(row, textvariable=v["key"], width=9).pack(side="left", padx=2)
-            tk.Spinbox(row, from_=0, to=100, textvariable=v["target_hp_max"],
-                       width=8).pack(side="left", padx=2)
+            tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["key"], width=5).pack(side="left", padx=1)
+            tk.Spinbox(row, from_=0, to=100, textvariable=v["target_hp_above"],
+                       width=5).pack(side="left", padx=1)
+            tk.Spinbox(row, from_=0, to=100, textvariable=v["target_hp_below"],
+                       width=5).pack(side="left", padx=1)
             tk.Spinbox(row, from_=0, to=100, textvariable=v["mp_min"],
-                       width=6).pack(side="left", padx=2)
+                       width=5).pack(side="left", padx=1)
             tk.Spinbox(row, from_=0.0, to=600.0, increment=0.5,
-                       textvariable=v["cooldown"], width=6).pack(side="left", padx=2)
-            tk.Button(row, text="Удалить",
-                      command=lambda i=idx: self._del_skill_row(i)).pack(side="left", padx=2)
+                       textvariable=v["cooldown"], width=5).pack(side="left", padx=1)
+            tk.Checkbutton(row, variable=v["once"], width=2).pack(side="left", padx=1)
+            tk.Button(row, text="↑", width=2,
+                      command=lambda i=idx: self._move_skill_row(i, -1),
+                      state=("disabled" if idx == 0 else "normal")).pack(side="left")
+            tk.Button(row, text="↓", width=2,
+                      command=lambda i=idx: self._move_skill_row(i, 1),
+                      state=("disabled" if idx == n - 1 else "normal")).pack(side="left")
+            tk.Button(row, text="✕", width=2,
+                      command=lambda i=idx: self._del_skill_row(i)).pack(side="left")
 
     def _save_controls(self):
         # клавиши
         keys = {}
         for action, _ in KEY_ACTIONS:
             keys[action] = self._key_vars[action].get().strip() or None
-        # способности
+        # способности (ротация)
         skills = []
         for i, v in enumerate(self._skill_vars, 1):
             try:
-                thp = max(0, min(100, int(v["target_hp_max"].get())))
+                above = max(0, min(100, int(v["target_hp_above"].get())))
+                below = max(0, min(100, int(v["target_hp_below"].get())))
                 mp = max(0, min(100, int(v["mp_min"].get())))
                 cd = max(0.0, float(v["cooldown"].get()))
             except (tk.TclError, ValueError):
                 self._ctrl_status.set("Проверь числовые поля способностей.")
                 return
+            if above > below:            # защита от перепутанных границ
+                above, below = below, above
             skills.append({
                 "key": v["key"].get().strip(),
                 "label": f"Скилл {i}",
                 "cooldown": cd,
-                "target_hp_max": thp,
+                "target_hp_above": above,
+                "target_hp_below": below,
                 "mp_min": mp,
+                "once": bool(v["once"].get()),
+                "enabled": bool(v["enabled"].get()),
+            })
+        # банки (HP/MP)
+        try:
+            heal = {"enabled": bool(self._heal_vars["enabled"].get()),
+                    "key": self._heal_vars["key"].get().strip() or None,
+                    "hp_percent": max(1, min(99, int(self._heal_vars["pct"].get()))),
+                    "cooldown": max(0.0, float(self._heal_vars["cooldown"].get()))}
+            mppot = {"enabled": bool(self._mppot_vars["enabled"].get()),
+                     "key": self._mppot_vars["key"].get().strip() or None,
+                     "mp_percent": max(1, min(99, int(self._mppot_vars["pct"].get()))),
+                     "cooldown": max(0.0, float(self._mppot_vars["cooldown"].get()))}
+        except (tk.TclError, ValueError):
+            self._ctrl_status.set("Проверь числовые поля лечения.")
+            return
+        # самобаффы
+        buffs = []
+        for v in self._buff_vars:
+            try:
+                cd = max(0.0, float(v["cooldown"].get()))
+            except (tk.TclError, ValueError):
+                self._ctrl_status.set("Проверь КД баффов.")
+                return
+            buffs.append({
+                "label": v["label"].get().strip(),
+                "key": v["key"].get().strip() or None,
+                "cooldown": cd,
                 "enabled": bool(v["enabled"].get()),
             })
         settings.set("keys", keys)
         settings.set("skills", skills)
+        settings.set("heal", heal)
+        settings.set("mp_potion", mppot)
+        settings.set("buffs", buffs)
         settings.apply_to_config()   # применить сразу (в т.ч. на работающем боте)
-        self._ctrl_status.set(f"Сохранено: {len([s for s in skills if s['key']])} "
-                              f"способностей, клавиши обновлены.")
-        self._append_log("Клавиши и способности обновлены.")
+        self._ctrl_status.set(
+            f"Сохранено: {len([s for s in skills if s['key']])} способностей, "
+            f"{len([b for b in buffs if b['key']])} баффов, лечение и клавиши.")
+        self._append_log("Клавиши, лечение, способности и баффы обновлены.")
 
     # --- отладочный оверлей с рамками мобов ---
     def _toggle_debug_overlay(self):
@@ -757,11 +946,23 @@ class App:
         style = user32.GetWindowLongW(hwnd, -20)   # GWL_EXSTYLE
         # WS_EX_LAYERED (0x80000) | WS_EX_TRANSPARENT (0x20)
         user32.SetWindowLongW(hwnd, -20, style | 0x80000 | 0x20)
+        # Исключить оверлей из ЗАХВАТА ЭКРАНА (mss): иначе наши же рамки попадают
+        # в следующий скриншот поверх иконок/мобов и ломают детекцию (мигание).
+        # WDA_EXCLUDEFROMCAPTURE = 0x11 (Windows 10 2004+); окно остаётся видимым
+        # глазом, но невидимо для скриншотов.
+        try:
+            user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+        except Exception:
+            pass
 
     def _overlay_panic(self):
         # хоткей F10 срабатывает из потока keyboard -> выполняем на главном потоке
-        self.root.after(0, lambda: (self.debug_var.set(False),
-                                    self._destroy_debug_overlay()))
+        def _kill():
+            self.debug_var.set(False)
+            self._destroy_debug_overlay()
+            self.zones_var.set(False)
+            self._destroy_zones_overlay()
+        self.root.after(0, _kill)
 
     def _destroy_debug_overlay(self):
         self._overlay_stop.set()
@@ -772,6 +973,109 @@ class App:
                 pass
         self.debug_overlay = None
         self.debug_canvas = None
+
+    # --- оверлей выделенных зон (статичный, для проверки калибровки) ---
+    def _toggle_zones_overlay(self):
+        if self.zones_var.get():
+            self._create_zones_overlay()
+        else:
+            self._destroy_zones_overlay()
+
+    def _create_zones_overlay(self):
+        if self.zones_overlay is not None:
+            return
+        ov = tk.Toplevel(self.root)
+        ov.attributes("-fullscreen", True)
+        ov.attributes("-topmost", True)
+        ov.configure(bg="black")
+        try:
+            ov.attributes("-transparentcolor", "black")
+        except tk.TclError:
+            pass
+        cv = tk.Canvas(ov, bg="black", highlightthickness=0)
+        cv.pack(fill="both", expand=True)
+        try:
+            self._make_clickthrough(ov)
+        except Exception as e:
+            ov.destroy()
+            self.zones_var.set(False)
+            self._append_log(f"[!] Клик-сквозь зон не удался ({e}). Оверлей отключён.")
+            return
+        self.zones_overlay = ov
+        self.zones_canvas = cv
+        self._draw_zones()
+        self.root.after(1000, self._zones_refresh)   # периодически перерисовывать
+        self._append_log("Оверлей зон включён (F10 — аварийно убрать).")
+
+    def _zones_refresh(self):
+        if self.zones_overlay is None:
+            return
+        self._draw_zones()
+        self.root.after(1000, self._zones_refresh)
+
+    def _draw_zones(self):
+        cv = self.zones_canvas
+        if cv is None:
+            return
+        cv.delete("all")
+        zones = [
+            ("HP", settings.get("bar_hp"), "#ff5252"),
+            ("MP", settings.get("bar_mp"), "#448aff"),
+            ("CP", settings.get("bar_cp"), "#ffd740"),
+            ("Цель HP", settings.get("bar_target"), "#ff9100"),
+            ("Имя цели", settings.get("target_name_region"), "#18ffff"),
+            ("Поиск мобов", settings.get("search_region"), "#69f0ae"),
+            ("Персонаж", settings.get("character_anchor"), "#ea80fc"),
+            ("Баффы", settings.get("buff_region"), "#ffffff"),
+        ]
+        for label, r, color in zones:
+            if not r:
+                continue
+            l, t = int(r["left"]), int(r["top"])
+            w, h = int(r["width"]), int(r["height"])
+            cv.create_rectangle(l, t, l + w, t + h, outline=color, width=2)
+            cv.create_text(l + 2, max(6, t - 8), text=label, fill=color,
+                           anchor="w", font=("Segoe UI", 8, "bold"))
+        self._draw_buff_icons(cv)
+
+    def _draw_buff_icons(self, cv):
+        """Рамки иконок самобаффов: зелёная — бафф найден (висит), список красным
+        снизу — какие баффы сейчас НЕ найдены (спали)."""
+        buffs = settings.get("buffs") or []
+        breg = settings.get("buff_region")
+        if not buffs or not breg:
+            return
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+        except Exception:
+            return
+        missing = []
+        for b in buffs:
+            if not b.get("enabled") or not b.get("label"):
+                continue
+            label = b["label"]
+            score, box = targets.locate_buff(frame, breg, label)
+            if box and score >= config.BUFF_MATCH_THRESHOLD:
+                l, t, w, h = box
+                cv.create_rectangle(l, t, l + w, t + h, outline="#00e676", width=2)
+                cv.create_text(l + 2, max(6, t - 8), text=label, fill="#00e676",
+                               anchor="w", font=("Segoe UI", 8, "bold"))
+            else:
+                missing.append(label)
+        if missing:
+            cv.create_text(breg["left"] + 2, breg["top"] + breg["height"] + 10,
+                           text="нет баффа: " + ", ".join(missing), fill="#ff5252",
+                           anchor="w", font=("Segoe UI", 8, "bold"))
+
+    def _destroy_zones_overlay(self):
+        if self.zones_overlay is not None:
+            try:
+                self.zones_overlay.destroy()
+            except Exception:
+                pass
+        self.zones_overlay = None
+        self.zones_canvas = None
 
     def _overlay_fast_loop(self):
         """
@@ -1071,6 +1375,7 @@ class App:
             self.worker.stop()
         self._unregister_hotkeys()
         self._destroy_debug_overlay()
+        self._destroy_zones_overlay()
         self.root.after(200, self.root.destroy)
 
 

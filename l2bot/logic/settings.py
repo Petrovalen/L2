@@ -67,3 +67,11 @@ def apply_to_config():
     # способности: полный список из панели заменяет дефолтный
     if isinstance(data.get("skills"), list):
         config.SKILLS = data["skills"]
+    # лечение/банки: сливаем с дефолтами (чтобы не потерять недостающие поля)
+    if isinstance(data.get("heal"), dict):
+        config.HEAL = {**config.HEAL, **data["heal"]}
+    if isinstance(data.get("mp_potion"), dict):
+        config.MP_POTION = {**config.MP_POTION, **data["mp_potion"]}
+    # самобаффы: полный список из панели
+    if isinstance(data.get("buffs"), list):
+        config.BUFFS = data["buffs"]

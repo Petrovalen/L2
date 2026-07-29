@@ -219,13 +219,40 @@ def scan_nameplate_boxes(frame, region):
 _template_cache = {}
 
 
+def _imread_gray(path):
+    """
+    Прочитать изображение в grayscale, БЕЗОПАСНО для не-ASCII путей (кириллица).
+    cv2.imread на Windows не умеет Unicode-пути -> читаем через np.fromfile.
+    """
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except (OSError, ValueError):
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+
+
+def _imwrite(path, img):
+    """Сохранить изображение, безопасно для не-ASCII путей (cv2.imwrite не умеет)."""
+    ext = os.path.splitext(path)[1] or ".png"
+    try:
+        ok, buf = cv2.imencode(ext, img)
+        if not ok:
+            return False
+        buf.tofile(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _load_template(path):
     if path in _template_cache:
         return _template_cache[path]
     if not os.path.exists(path):
         _template_cache[path] = None
         return None
-    tpl = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    tpl = _imread_gray(path)
     _template_cache[path] = tpl
     return tpl
 
@@ -329,7 +356,7 @@ def save_name_template(frame, region, name):
     tpl = mask[by0:by1, bx0:bx1]
     os.makedirs(_TEMPLATE_DIR, exist_ok=True)
     path = template_path(name)
-    ok = cv2.imwrite(path, tpl)
+    ok = _imwrite(path, tpl)
     _template_cache.pop(path, None)       # сбросить кэш, чтобы перечитать свежий
     return bool(ok)
 
@@ -343,6 +370,93 @@ def delete_template(name):
     except OSError:
         pass
     _template_cache.pop(path, None)
+
+
+# ---------------------------------------------------------------------------
+# Иконки САМОБАФФОВ: определяем, висит ли бафф, по его иконке в панели баффов.
+# Иконка — цветная картинка, поэтому матчим по grayscale (а не по маске текста).
+# ---------------------------------------------------------------------------
+def buff_template_path(label):
+    return os.path.join(_TEMPLATE_DIR, "buff_" + _sanitize(label) + ".png")
+
+
+def save_buff_template(frame, region, label):
+    """Снять иконку баффа из обведённой области и сохранить (grayscale)."""
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    x = region["left"] - rgn["left"]; y = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, x); y0 = max(0, y)
+    x1 = min(w, x + region["width"]); y1 = min(h, y + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    os.makedirs(_TEMPLATE_DIR, exist_ok=True)
+    path = buff_template_path(label)
+    ok = _imwrite(path, gray)
+    _template_cache.pop(path, None)
+    return bool(ok)
+
+
+def delete_buff_template(label):
+    path = buff_template_path(label)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+    _template_cache.pop(path, None)
+
+
+def buff_present(frame, region, label, threshold=None):
+    """
+    Висит ли бафф `label`: ищем его иконку (шаблон) в зоне панели баффов.
+    True — иконка найдена (бафф активен). Если шаблона нет или зона кривая —
+    возвращаем True (проверить нечем; НЕ спамим кастом).
+    """
+    tpl = _load_template(buff_template_path(label))
+    if tpl is None or not region:
+        return True
+    threshold = config.BUFF_MATCH_THRESHOLD if threshold is None else threshold
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    ox = region["left"] - rgn["left"]; oy = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, ox); y0 = max(0, oy)
+    x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return True
+    crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    th, tw = tpl.shape[:2]
+    if th > crop.shape[0] or tw > crop.shape[1]:
+        return True
+    res = cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED)
+    return float(res.max()) >= threshold
+
+
+def locate_buff(frame, region, label):
+    """
+    Лучшее совпадение иконки баффа в зоне панели баффов.
+    Возврат: (score, (left, top, w, h)) в координатах экрана, либо (0.0, None).
+    Для отладочного оверлея: показать, где найдена иконка и её score.
+    """
+    tpl = _load_template(buff_template_path(label))
+    if tpl is None or not region:
+        return 0.0, None
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    ox = region["left"] - rgn["left"]; oy = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, ox); y0 = max(0, oy)
+    x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return 0.0, None
+    crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    th, tw = tpl.shape[:2]
+    if th > crop.shape[0] or tw > crop.shape[1]:
+        return 0.0, None
+    res = cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED)
+    _minv, maxv, _minl, maxl = cv2.minMaxLoc(res)
+    left = region["left"] + int(maxl[0])
+    top = region["top"] + int(maxl[1])
+    return float(maxv), (left, top, int(tw), int(th))
 
 
 def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
