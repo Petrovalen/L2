@@ -18,7 +18,7 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, simpledialog, messagebox
 
 import keyboard
 
@@ -27,7 +27,7 @@ from capture.screen import ScreenCapture
 from logic.fsm import BotFSM
 from logic.humanize import BreakScheduler
 from logic import mob_list
-from logic import settings
+from logic import settings, notify
 from control import input_ctl as ctl
 from vision import bars, ocr, targets
 
@@ -57,6 +57,46 @@ DEFAULT_SKILL = {"key": "", "label": "Скилл", "cooldown": 4.0,
 
 WARMUP_SEC = 3          # пауза перед стартом — успеть переключиться в игру
 MAX_LOG_LINES = 500     # ограничение размера ленты
+
+
+class _Tooltip:
+    """Всплывающая подсказка при наведении на виджет."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _e=None):
+        if self.tip is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 3
+        except tk.TclError:
+            return
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry("+%d+%d" % (x, y))
+        self.tip.attributes("-topmost", True)
+        tk.Label(self.tip, text=self.text, bg="#ffffe0", fg="#222",
+                 relief="solid", borderwidth=1, font=("Segoe UI", 8),
+                 justify="left", wraplength=340, padx=5, pady=3).pack()
+
+    def _hide(self, _e=None):
+        if self.tip is not None:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
+
+
+def tip(widget, text):
+    """Навесить подсказку на виджет и вернуть его (для чейнинга)."""
+    _Tooltip(widget, text)
+    return widget
 
 
 class BotWorker(threading.Thread):
@@ -178,10 +218,8 @@ class App:
         settings.apply_to_config()   # применить сохранённые настройки панели
 
         root.title("l2bot — панель управления")
-        # выше, чем раньше: добавились панели «Камера» и «Цифры», иначе лента
-        # действий уезжала за нижний край. Окно можно свободно растягивать.
-        root.geometry("480x1150")
-        root.minsize(440, 640)
+        root.geometry("560x900")
+        root.minsize(520, 640)
 
         # --- баннер статуса ---
         self.status_var = tk.StringVar(value="ОСТАНОВЛЕН")
@@ -190,16 +228,36 @@ class App:
                                fg="white", bg="#555", pady=10)
         self.banner.pack(fill="x")
 
-        # --- полоски HP/MP/CP ---
-        bars = ttk.LabelFrame(root, text="Состояние персонажа")
-        bars.pack(fill="x", padx=10, pady=8)
-        self.hp = self._make_bar(bars, "HP")
-        self.mp = self._make_bar(bars, "MP")
-        self.cp = self._make_bar(bars, "CP")
+        # --- профили (ПК / персонаж) ---
+        self._build_profiles_bar(root)
+
+        # --- полоски HP/MP/CP (всегда видны) ---
+        barf = ttk.LabelFrame(root, text="Состояние персонажа")
+        barf.pack(fill="x", padx=10, pady=(6, 4))
+        self.hp = self._make_bar(barf, "HP")
+        self.mp = self._make_bar(barf, "MP")
+        self.cp = self._make_bar(barf, "CP")
+
+        # --- вкладки настроек (статус/бары/кнопки/лента — всегда видны вне вкладок) ---
+        # Каждая вкладка прокручивается: контента много, окно может быть меньше.
+        # Вкладки и «Действия бота» разделены перетаскиваемым сплиттером —
+        # пользователь мышью растягивает окошко действий по высоте.
+        self._main_paned = ttk.PanedWindow(root, orient="vertical")
+        self._nb = ttk.Notebook(self._main_paned)
+        _p_calib = ttk.Frame(self._nb); self._nb.add(_p_calib, text=" Калибровка ")
+        _p_mobs = ttk.Frame(self._nb); self._nb.add(_p_mobs, text=" Мобы и поиск ")
+        _p_combat = ttk.Frame(self._nb); self._nb.add(_p_combat, text=" Бой ")
+        _p_notify = ttk.Frame(self._nb); self._nb.add(_p_notify, text=" Уведомления ")
+        tab_calib = self._scrollable(_p_calib)
+        tab_mobs = self._scrollable(_p_mobs)
+        tab_combat = self._scrollable(_p_combat)
+        tab_notify = self._scrollable(_p_notify)
 
         # --- калибровка полосок рамкой ---
-        calib = ttk.LabelFrame(root, text="Калибровка полосок (обведи рамкой ПОЛНУЮ полоску)")
-        calib.pack(fill="x", padx=10, pady=(0, 6))
+        calib = ttk.LabelFrame(tab_calib, text="Калибровка полосок (обведи рамкой ПОЛНУЮ полоску)")
+        calib.pack(fill="x", padx=10, pady=(6, 6))
+        tip(calib, "Обведи каждую полоску целиком (заполненной). В ту же рамку "
+                   "должны попасть цифры, если включишь режим «Чтение цифрами».")
         crow = tk.Frame(calib)
         crow.pack(fill="x", padx=6, pady=4)
         for label, key, wide in (("HP", "hp", 5), ("MP", "mp", 5),
@@ -213,8 +271,10 @@ class App:
                  fg="#1565c0", anchor="w").pack(fill="x", padx=8)
 
         # --- режим «цифры» (OCR чисел, вшитых в бар) ---
-        dg = ttk.LabelFrame(root, text="Чтение цифрами (OCR): процент = тек/макс × 100")
+        dg = ttk.LabelFrame(tab_calib, text="Чтение цифрами (OCR): процент = тек/макс × 100")
         dg.pack(fill="x", padx=10, pady=(0, 6))
+        tip(dg, "Читать HP/MP/CP/цель как ЧИСЛА из бара (когда в рамку попали цифры), "
+                "а не по заливке. Max пусто = брать максимум из формата «тек/макс».")
         self.digit_enabled = {}
         self.digit_max_var = {}
         for label, key in (("HP", "hp"), ("MP", "mp"), ("CP", "cp"), ("HP цели", "target")):
@@ -256,6 +316,9 @@ class App:
         self.start_btn.pack(side="left", expand=True, fill="x", padx=2)
         self.pause_btn.pack(side="left", expand=True, fill="x", padx=2)
         self.stop_btn.pack(side="left", expand=True, fill="x", padx=2)
+        tip(self.start_btn, "Запустить бота. Даётся 3 сек, чтобы переключиться в игру.")
+        tip(self.pause_btn, "Пауза/продолжить (также F11). Бот замирает, не теряя настройки.")
+        tip(self.stop_btn, "Полностью остановить бота (также клавиша стопа, по умолч. F12).")
 
         hk = tk.Frame(root)
         hk.pack(fill="x", padx=12)
@@ -273,20 +336,27 @@ class App:
         self._update_hotkey_label()
 
         # --- белый список мобов ---
-        mobframe = ttk.LabelFrame(root, text="Мои мобы (кого бить)")
+        mobframe = ttk.LabelFrame(tab_mobs, text="Мои мобы (кого бить)")
         mobframe.pack(fill="x", padx=10, pady=6)
         row = tk.Frame(mobframe)
         row.pack(fill="x", padx=6, pady=4)
         self.add_btn = tk.Button(row, text="＋ Добавить моба (рамкой)",
                                  command=self.add_mob)
         self.add_btn.pack(side="left")
+        tip(self.add_btn, "Обведи ник моба в игре — он попадёт в список «кого бить», "
+                          "и запомнится шаблон его ника для поиска.")
         self.del_btn = tk.Button(row, text="Удалить", command=self.remove_mob)
         self.del_btn.pack(side="left", padx=4)
+        tip(self.del_btn, "Удалить выбранного в списке моба (и его шаблон).")
         self.zone_btn = tk.Button(row, text="Зона поиска", command=self.set_search_region)
         self.zone_btn.pack(side="left", padx=4)
+        tip(self.zone_btn, "Область экрана, где бот ищет ники мобов. Обведи центр "
+                           "игрового мира без чата и панелей интерфейса.")
         self.char_btn = tk.Button(row, text="Точка персонажа",
                                   command=self.set_character_anchor)
         self.char_btn.pack(side="left", padx=4)
+        tip(self.char_btn, "Точка отсчёта «ближайшего» моба. Обведи небольшую область "
+                           "на персонаже (лучше по ногам).")
         self.mob_status = tk.StringVar(value="")
         tk.Label(mobframe, textvariable=self.mob_status, font=("Segoe UI", 8),
                  fg="#1565c0", anchor="w").pack(fill="x", padx=8)
@@ -295,8 +365,10 @@ class App:
         self._refresh_mobs()
 
         # --- настройки визуального поиска ---
-        setframe = ttk.LabelFrame(root, text="Настройки поиска мобов")
+        setframe = ttk.LabelFrame(tab_mobs, text="Настройки поиска мобов")
         setframe.pack(fill="x", padx=10, pady=6)
+        tip(setframe, "Визуальный поиск по никам, проверка имени цели, отладочные "
+                      "рамки/зоны и смещение точки клика по телу моба.")
         self.vision_var = tk.BooleanVar(value=config.VISION_TARGETING)
         tk.Checkbutton(setframe, text="Визуальный поиск ников (OCR)",
                        variable=self.vision_var,
@@ -313,10 +385,19 @@ class App:
         tk.Checkbutton(setframe, text="Показывать выделенные зоны (отладка)",
                        variable=self.zones_var,
                        command=self._toggle_zones_overlay).pack(anchor="w", padx=6)
+        rx = tk.Frame(setframe)
+        rx.pack(fill="x", padx=6)
+        tk.Label(rx, text="Смещение клика X, px", width=18, anchor="w").pack(side="left")
+        self.dx_scale = tk.Scale(rx, from_=-60, to=60, orient="horizontal",
+                                 command=self._on_click_dx)
+        self.dx_scale.set(config.NAME_CLICK_DX)
+        self.dx_scale.pack(side="left", fill="x", expand=True)
+        self.dx_scale.bind("<ButtonRelease-1>", lambda e:
+                           settings.set("name_click_dx", int(self.dx_scale.get())))
         r1 = tk.Frame(setframe)
         r1.pack(fill="x", padx=6)
-        tk.Label(r1, text="Смещение клика, px", width=18, anchor="w").pack(side="left")
-        self.dy_scale = tk.Scale(r1, from_=0, to=80, orient="horizontal",
+        tk.Label(r1, text="Смещение клика Y, px", width=18, anchor="w").pack(side="left")
+        self.dy_scale = tk.Scale(r1, from_=-40, to=80, orient="horizontal",
                                  command=self._on_click_dy)
         self.dy_scale.set(config.NAME_CLICK_DY)
         self.dy_scale.pack(side="left", fill="x", expand=True)
@@ -333,8 +414,11 @@ class App:
                            settings.set("vision_interval", float(self.iv_scale.get())))
 
         # --- камера (активный поиск) ---
-        camframe = ttk.LabelFrame(root, text="Камера (активный поиск)")
+        camframe = ttk.LabelFrame(tab_mobs, text="Камера (активный поиск)")
         camframe.pack(fill="x", padx=10, pady=6)
+        tip(camframe, "Когда цель не находится, бот вращает камеру (зажатая ПКМ), "
+                      "чтобы в кадр попали новые мобы. Скорость = резкость поворота, "
+                      "плавность = длительность свайпа.")
         self.camera_var = tk.BooleanVar(value=config.CAMERA_SEARCH)
         tk.Checkbutton(camframe, text="Крутить камеру, когда цель не найдена",
                        variable=self.camera_var,
@@ -359,26 +443,72 @@ class App:
         self.camdur_scale.bind("<ButtonRelease-1>", lambda e:
                                settings.set("camera_step_duration", float(self.camdur_scale.get())))
 
-        # --- клавиши и способности ---
-        ctrlframe = ttk.LabelFrame(root, text="Клавиши и способности")
-        ctrlframe.pack(fill="x", padx=10, pady=6)
-        tk.Button(ctrlframe, text="⚙ Настроить клавиши и способности",
-                  command=self.open_controls_dialog).pack(fill="x", padx=6, pady=6)
+        # --- вкладка «Бой»: клавиши, лечение, ротация, баффы (со скроллом) ---
+        self._build_combat_tab(tab_combat)
 
-        # --- лента действий ---
-        logframe = ttk.LabelFrame(root, text="Действия бота")
-        logframe.pack(fill="both", expand=True, padx=10, pady=8)
-        self.log = tk.Text(logframe, height=10, state="disabled",
+        # --- Telegram: уведомление на телефон при смерти ---
+        tgf = ttk.LabelFrame(tab_notify, text="Telegram (уведомление о смерти)")
+        tgf.pack(fill="x", padx=10, pady=6)
+        tip(tgf, "Пришлёт сообщение в Telegram, когда HP держится ~0 (смерть). "
+                 "Токен — от @BotFather, chat_id — свой (напр. через @userinfobot).")
+        self.tg_enabled = tk.BooleanVar(value=config.DEATH_NOTIFY)
+        tk.Checkbutton(tgf, text="Слать в Telegram, когда HP=0",
+                       variable=self.tg_enabled).pack(anchor="w", padx=6)
+        self.cp_notify = tk.BooleanVar(value=config.CP_NOTIFY)
+        tk.Checkbutton(tgf, text="Слать, когда CP пробит (перестал быть полным)",
+                       variable=self.cp_notify).pack(anchor="w", padx=6)
+        tr1 = tk.Frame(tgf); tr1.pack(fill="x", padx=6, pady=1)
+        tk.Label(tr1, text="Токен бота", width=10, anchor="w").pack(side="left")
+        self.tg_token = tk.StringVar(value=config.TELEGRAM_TOKEN)
+        tk.Entry(tr1, textvariable=self.tg_token, show="•").pack(side="left", fill="x", expand=True)
+        tr2 = tk.Frame(tgf); tr2.pack(fill="x", padx=6, pady=1)
+        tk.Label(tr2, text="chat_id", width=10, anchor="w").pack(side="left")
+        self.tg_chat = tk.StringVar(value=config.TELEGRAM_CHAT_ID)
+        tk.Entry(tr2, textvariable=self.tg_chat, width=18).pack(side="left")
+        tk.Button(tr2, text="Сохранить+тест",
+                  command=self._save_telegram).pack(side="left", padx=6)
+        self.tg_status = tk.StringVar(value="")
+        tk.Label(tgf, textvariable=self.tg_status, font=("Segoe UI", 8),
+                 fg="#1565c0", anchor="w").pack(fill="x", padx=8)
+
+        # --- лента действий (растягивается сплиттером; тянуть за разделитель) ---
+        logframe = ttk.LabelFrame(self._main_paned, text="Действия бота (тяни разделитель ↕)")
+        self.log = tk.Text(logframe, height=8, state="disabled",
                            font=("Consolas", 9), bg="#1e1e1e", fg="#d4d4d4",
                            wrap="none")
         scroll = ttk.Scrollbar(logframe, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
         self.log.pack(side="left", fill="both", expand=True)
+        # вкладки сверху (больше веса), лента снизу — с перетаскиваемым сплиттером
+        self._main_paned.add(self._nb, weight=3)
+        self._main_paned.add(logframe, weight=1)
+        self._main_paned.pack(fill="both", expand=True, padx=6, pady=4)
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._register_hotkeys()        # F11/F12/F10 — один раз на всё время работы
         self.root.after(50, self._drain)
+
+    def _scrollable(self, parent):
+        """Вернуть внутренний фрейм с вертикальной прокруткой внутри `parent`
+        (для высоких вкладок, напр. «Бой»)."""
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        vsb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = tk.Frame(canvas)
+        win_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(win_id, width=e.width))
+        # прокрутка колесом только пока курсор над этой областью
+        def _wheel(e):
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+        inner.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _wheel))
+        inner.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        return inner
 
     def _make_bar(self, parent, name):
         row = tk.Frame(parent)
@@ -567,6 +697,23 @@ class App:
         settings.set("vision_targeting", v)
         self.mob_status.set(f"Визуальный поиск: {'включён' if v else 'выключен'}")
 
+    def _save_telegram(self):
+        enabled = bool(self.tg_enabled.get())
+        token = self.tg_token.get().strip()
+        chat = self.tg_chat.get().strip()
+        settings.set("death_notify", enabled)
+        settings.set("cp_notify", bool(self.cp_notify.get()))
+        settings.set("telegram_token", token)
+        settings.set("telegram_chat_id", chat)
+        settings.apply_to_config()
+        ok = notify.send_telegram(token, chat, "L2: тест уведомления ✅")
+        self.tg_status.set("Сохранено. Тест отправлен — проверь Telegram."
+                           if ok else "Сохранено. Для теста заполни токен и chat_id.")
+        self._append_log("Telegram-уведомления обновлены.")
+
+    def _on_click_dx(self, val):
+        config.NAME_CLICK_DX = int(float(val))   # применяем сразу; сохраняем при отпускании
+
     def _on_click_dy(self, val):
         config.NAME_CLICK_DY = int(float(val))   # применяем сразу; сохраняем при отпускании
 
@@ -591,33 +738,139 @@ class App:
     def _on_camera_duration(self, val):
         config.CAMERA_STEP_DURATION = float(val)        # применяем сразу; сохраняем при отпускании
 
-    # --- редактор клавиш и способностей -----------------------------------
-    def open_controls_dialog(self):
-        """Окно настройки клавиш действий и списка способностей (с условиями)."""
-        if getattr(self, "_ctrl_win", None) is not None:
-            try:
-                self._ctrl_win.deiconify()
-                self._ctrl_win.lift()
-                self._ctrl_win.focus_force()
-                return
-            except tk.TclError:
-                self._ctrl_win = None
+    # --- вкладка «Бой»: клавиши/лут, лечение, ротация, баффы ----------------
+    # ---- профили (ПК / персонаж) -------------------------------------------
+    def _build_profiles_bar(self, parent):
+        """
+        Панель выбора активных профилей. Профиль КОМПЬЮТЕРА — калибровки экрана;
+        профиль ПЕРСОНАЖА — клавиши/скиллы/баффы/лечение. Общие настройки (камера,
+        Telegram, лут, тайминги) в профили не входят.
+        """
+        pf = ttk.LabelFrame(parent, text="Профили (выбираются вручную)")
+        pf.pack(fill="x", padx=10, pady=(4, 4))
+        tip(pf, "Профиль «Компьютер» — калибровки полосок и зон под этот экран.\n"
+                "Профиль «Персонаж» — клавиши, ротация скиллов, баффы, лечение.\n"
+                "«Новый» — пустой, «Копия» — копия текущего. Переключение применяется сразу.")
+        self._profile_cb = {}
+        for kind, label in (("machine", "Компьютер"), ("character", "Персонаж")):
+            row = tk.Frame(pf)
+            row.pack(fill="x", padx=6, pady=2)
+            tk.Label(row, text=label, width=10, anchor="w").pack(side="left")
+            cb = ttk.Combobox(row, width=16, state="readonly",
+                              values=settings.list_profiles(kind))
+            cb.set(settings.active_profile(kind) or "")
+            cb.pack(side="left", padx=(0, 4))
+            cb.bind("<<ComboboxSelected>>",
+                    lambda e, k=kind: self._switch_profile(k, self._profile_cb[k].get()))
+            self._profile_cb[kind] = cb
+            tk.Button(row, text="Новый", width=6,
+                      command=lambda k=kind: self._new_profile(k, copy=False)).pack(side="left", padx=1)
+            tk.Button(row, text="Копия", width=6,
+                      command=lambda k=kind: self._new_profile(k, copy=True)).pack(side="left", padx=1)
+            tk.Button(row, text="✎", width=2,
+                      command=lambda k=kind: self._rename_profile(k)).pack(side="left", padx=1)
+            tk.Button(row, text="🗑", width=2,
+                      command=lambda k=kind: self._delete_profile(k)).pack(side="left", padx=1)
 
-        win = tk.Toplevel(self.root)
-        self._ctrl_win = win
-        win.title("Клавиши и способности")
-        win.geometry("600x860")
-        win.minsize(560, 600)
-        win.transient(self.root)
+    def _kind_label(self, kind):
+        return "ПК" if kind == "machine" else "персонажа"
 
-        def on_close():
-            self._ctrl_win = None
-            win.destroy()
-        win.protocol("WM_DELETE_WINDOW", on_close)
+    def _refresh_profile_lists(self):
+        """Обновить выпадающие списки профилей и выделить активные."""
+        for kind, cb in self._profile_cb.items():
+            cb["values"] = settings.list_profiles(kind)
+            cb.set(settings.active_profile(kind) or "")
+
+    def _switch_profile(self, kind, name):
+        settings.set_active(kind, name)
+        settings.apply_to_config()
+        self._reload_profile_fields()
+        self._append_log("Профиль %s: %s" % (self._kind_label(kind), name))
+
+    def _new_profile(self, kind, copy=False):
+        title = "Новый профиль " + self._kind_label(kind)
+        name = simpledialog.askstring(title, "Имя профиля:", parent=self.root)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if name in settings.list_profiles(kind):
+            messagebox.showwarning(title, "Профиль с таким именем уже есть.")
+            return
+        src = settings.active_profile(kind) if copy else None
+        settings.create_profile(kind, name, copy_from=src)
+        settings.apply_to_config()
+        self._refresh_profile_lists()
+        self._reload_profile_fields()
+        self._append_log("Создан профиль %s: %s%s"
+                         % (self._kind_label(kind), name, " (копия)" if copy else ""))
+
+    def _rename_profile(self, kind):
+        cur = settings.active_profile(kind)
+        name = simpledialog.askstring("Переименовать профиль " + self._kind_label(kind),
+                                      "Новое имя:", initialvalue=cur, parent=self.root)
+        if not name or not name.strip() or name.strip() == cur:
+            return
+        if name.strip() in settings.list_profiles(kind):
+            messagebox.showwarning("Переименовать", "Профиль с таким именем уже есть.")
+            return
+        settings.rename_profile(kind, cur, name.strip())
+        self._refresh_profile_lists()
+
+    def _delete_profile(self, kind):
+        cur = settings.active_profile(kind)
+        if len(settings.list_profiles(kind)) <= 1:
+            messagebox.showinfo("Удалить профиль", "Нельзя удалить последний профиль.")
+            return
+        if not messagebox.askyesno("Удалить профиль",
+                                   "Удалить профиль %s «%s»?" % (self._kind_label(kind), cur)):
+            return
+        settings.delete_profile(kind, cur)
+        settings.apply_to_config()
+        self._refresh_profile_lists()
+        self._reload_profile_fields()
+        self._append_log("Удалён профиль %s: %s" % (self._kind_label(kind), cur))
+
+    def _set_potion_vars(self, v, cfg, pct_key):
+        v["enabled"].set(bool(cfg.get("enabled")))
+        v["key"].set(str(cfg.get("key") or ""))
+        v["pct"].set(int(cfg.get(pct_key, 0)))
+        v["cooldown"].set(float(cfg.get("cooldown", 3.0)))
+
+    def _reload_profile_fields(self):
+        """Перелить значения активных профилей в существующие поля панели."""
+        # клавиши (профиль персонажа)
+        for action, var in getattr(self, "_key_vars", {}).items():
+            var.set(config.KEYS.get(action) or "")
+        # лечение / банки (профиль персонажа)
+        if hasattr(self, "_heal_vars"):
+            self._set_potion_vars(self._heal_vars, config.HEAL, "hp_percent")
+        if hasattr(self, "_mppot_vars"):
+            self._set_potion_vars(self._mppot_vars, config.MP_POTION, "mp_percent")
+        # ротация скиллов (перерисовать строки из config.SKILLS)
+        if hasattr(self, "_skill_vars"):
+            self._skill_vars = [self._skill_to_vars({**DEFAULT_SKILL, **sk})
+                                for sk in config.SKILLS]
+            self._render_skill_rows()
+        # баффы
+        if hasattr(self, "_buff_vars"):
+            self._buff_vars = [self._buff_to_vars(b) for b in config.BUFFS]
+            self._render_buff_rows()
+        # режим цифр (профиль ПК)
+        for key, var in getattr(self, "digit_enabled", {}).items():
+            d = settings.get("bar_%s_digits" % key) or {}
+            var.set(bool(d.get("enabled")))
+            if key in self.digit_max_var:
+                self.digit_max_var[key].set(str(d.get("max") or ""))
+
+    def _build_combat_tab(self, parent):
+        """Собрать боевые настройки прямо в контейнере вкладки `parent`."""
+        win = parent   # строим во вкладке, не в отдельном окне
 
         # --- клавиши действий ---
         kf = ttk.LabelFrame(win, text="Клавиши действий (имя клавиши: 1, 2, f1, e…)")
         kf.pack(fill="x", padx=10, pady=(10, 6))
+        tip(kf, "Игровые клавиши действий бота. «Следующая цель» нужна, чтобы "
+                "обходить недостижимого моба. «Подбор лута» — сколько раз жать после убийства.")
         self._key_vars = {}
         for action, label in KEY_ACTIONS:
             row = tk.Frame(kf)
@@ -626,12 +879,25 @@ class App:
             var = tk.StringVar(value=config.KEYS.get(action) or "")
             tk.Entry(row, textvariable=var, width=8).pack(side="left")
             self._key_vars[action] = var
+        lootrow = tk.Frame(kf)
+        lootrow.pack(fill="x", padx=8, pady=2)
+        tk.Label(lootrow, text="Подбор лута: нажатий от/до", width=26,
+                 anchor="w").pack(side="left")
+        self._loot_presses_min_var = tk.IntVar(value=int(config.LOOT_PRESSES_MIN))
+        tk.Spinbox(lootrow, from_=1, to=10, width=4,
+                   textvariable=self._loot_presses_min_var).pack(side="left")
+        tk.Label(lootrow, text="—").pack(side="left", padx=2)
+        self._loot_presses_max_var = tk.IntVar(value=int(config.LOOT_PRESSES_MAX))
+        tk.Spinbox(lootrow, from_=1, to=10, width=4,
+                   textvariable=self._loot_presses_max_var).pack(side="left")
         tk.Label(kf, text="Пусто = действие отключено.", font=("Segoe UI", 8),
                  fg="#666", anchor="w").pack(fill="x", padx=10, pady=(0, 4))
 
         # --- лечение / банки (выживание, работает в любом состоянии) ---
         hf = ttk.LabelFrame(win, text="Лечение (пить при падении своего HP/MP)")
         hf.pack(fill="x", padx=10, pady=6)
+        tip(hf, "Отдельные банки: пить, когда своё HP/MP опустилось ниже %. "
+                "Работает всегда — и в бою, и вне боя.")
         self._heal_vars = self._potion_to_vars(config.HEAL, "hp_percent")
         self._mppot_vars = self._potion_to_vars(config.MP_POTION, "mp_percent")
         self._render_potion_row(hf, "HP-банка", self._heal_vars, "HP <", "%")
@@ -649,8 +915,8 @@ class App:
 
         head = tk.Frame(sf)
         head.pack(fill="x", padx=8)
-        for text, w in (("вкл", 3), ("Клав", 6), ("HP от", 6), ("HP до", 6),
-                        ("MP ≥", 6), ("КД", 5), ("раз", 4), ("", 10)):
+        for text, w in (("вкл", 3), ("Клав", 6), ("HP от %", 7), ("HP до %", 7),
+                        ("MP ≥ %", 7), ("КД", 5), ("раз", 4), ("гот", 5), ("", 8)):
             tk.Label(head, text=text, width=w, anchor="w",
                      font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
 
@@ -689,17 +955,13 @@ class App:
         tk.Button(bf, text="＋ Добавить бафф",
                   command=self._add_buff_row).pack(anchor="w", padx=8, pady=4)
 
-        # --- статус + кнопки ---
+        # --- статус + сохранить ---
         self._ctrl_status = tk.StringVar(value="")
         tk.Label(win, textvariable=self._ctrl_status, font=("Segoe UI", 8),
                  fg="#1565c0", anchor="w").pack(fill="x", padx=12)
-        btns = tk.Frame(win)
-        btns.pack(fill="x", padx=10, pady=8)
-        tk.Button(btns, text="💾 Сохранить", command=self._save_controls,
-                  bg="#2e7d32", fg="white", font=("Segoe UI", 10, "bold")).pack(
-            side="left", expand=True, fill="x", padx=2)
-        tk.Button(btns, text="Закрыть", command=on_close).pack(
-            side="left", expand=True, fill="x", padx=2)
+        tk.Button(win, text="💾 Сохранить боевые настройки",
+                  command=self._save_controls, bg="#2e7d32", fg="white",
+                  font=("Segoe UI", 10, "bold")).pack(fill="x", padx=10, pady=8)
 
     # --- банки (HP/MP) ---
     def _potion_to_vars(self, cfg, pct_key):
@@ -733,7 +995,36 @@ class App:
             "mp_min": tk.IntVar(value=int(sk.get("mp_min", 0))),
             "cooldown": tk.DoubleVar(value=float(sk.get("cooldown", 4.0))),
             "once": tk.BooleanVar(value=bool(sk.get("once", False))),
+            "ready_region": sk.get("ready_region"),   # dict|None (проверка готовности)
         }
+
+    def _capture_skill_ready(self, idx):
+        if not (0 <= idx < len(self._skill_vars)):
+            return
+        key = self._skill_vars[idx]["key"].get().strip()
+        if not key:
+            self._ctrl_status.set("Сначала впиши клавишу скилла (для файла иконки).")
+            return
+        self._select_region(
+            f"Обведи ИКОНКУ скилла (клавиша {key}) в хотбаре — скилл должен быть "
+            "ГОТОВ (не на откате)   Esc — отмена",
+            lambda l, t, w, h: self._save_skill_ready(idx, key, l, t, w, h))
+
+    def _save_skill_ready(self, idx, key, left, top, w, h):
+        region = {"left": left, "top": top, "width": w, "height": h}
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+            ok = targets.save_skill_template(frame, region, key)
+        except Exception as e:
+            self._ctrl_status.set(f"Ошибка захвата иконки скилла: {e}")
+            return
+        if ok and 0 <= idx < len(self._skill_vars):
+            self._skill_vars[idx]["ready_region"] = region
+            self._render_skill_rows()
+            self._ctrl_status.set(f"Готовность скилла (клавиша {key}) настроена.")
+        else:
+            self._ctrl_status.set("Иконку скилла сохранить не удалось.")
 
     # --- самобаффы ---
     def _buff_to_vars(self, b):
@@ -826,6 +1117,10 @@ class App:
             tk.Spinbox(row, from_=0.0, to=600.0, increment=0.5,
                        textvariable=v["cooldown"], width=5).pack(side="left", padx=1)
             tk.Checkbutton(row, variable=v["once"], width=2).pack(side="left", padx=1)
+            ready_set = bool(v.get("ready_region"))
+            tk.Button(row, text=("гот✓" if ready_set else "гот"), width=4,
+                      fg=("#2e7d32" if ready_set else "black"),
+                      command=lambda i=idx: self._capture_skill_ready(i)).pack(side="left", padx=1)
             tk.Button(row, text="↑", width=2,
                       command=lambda i=idx: self._move_skill_row(i, -1),
                       state=("disabled" if idx == 0 else "normal")).pack(side="left")
@@ -862,6 +1157,7 @@ class App:
                 "mp_min": mp,
                 "once": bool(v["once"].get()),
                 "enabled": bool(v["enabled"].get()),
+                "ready_region": v.get("ready_region"),
             })
         # банки (HP/MP)
         try:
@@ -890,11 +1186,21 @@ class App:
                 "cooldown": cd,
                 "enabled": bool(v["enabled"].get()),
             })
+        try:
+            loot_min = max(1, int(self._loot_presses_min_var.get()))
+        except (tk.TclError, ValueError):
+            loot_min = config.LOOT_PRESSES_MIN
+        try:
+            loot_max = max(loot_min, int(self._loot_presses_max_var.get()))
+        except (tk.TclError, ValueError):
+            loot_max = max(loot_min, config.LOOT_PRESSES_MAX)
         settings.set("keys", keys)
         settings.set("skills", skills)
         settings.set("heal", heal)
         settings.set("mp_potion", mppot)
         settings.set("buffs", buffs)
+        settings.set("loot_presses_min", loot_min)
+        settings.set("loot_presses_max", loot_max)
         settings.apply_to_config()   # применить сразу (в т.ч. на работающем боте)
         self._ctrl_status.set(
             f"Сохранено: {len([s for s in skills if s['key']])} способностей, "
@@ -1370,7 +1676,27 @@ class App:
         self.log.delete("1.0", "end")
         self.log.config(state="disabled")
 
+    def _save_general_settings(self):
+        """
+        Сохранить ОБЩИЕ (непрофильные) настройки при выходе — чтобы галки/поля,
+        у которых нет мгновенного сохранения, оставались при следующем запуске
+        (напр. галка уведомления о пробитом CP). Остальные тумблеры сохраняются
+        сразу при изменении.
+        """
+        try:
+            if hasattr(self, "tg_enabled"):
+                settings.set("death_notify", bool(self.tg_enabled.get()))
+            if hasattr(self, "cp_notify"):
+                settings.set("cp_notify", bool(self.cp_notify.get()))
+            if hasattr(self, "tg_token"):
+                settings.set("telegram_token", self.tg_token.get().strip())
+            if hasattr(self, "tg_chat"):
+                settings.set("telegram_chat_id", self.tg_chat.get().strip())
+        except Exception:
+            pass
+
     def on_close(self):
+        self._save_general_settings()
         if self.worker:
             self.worker.stop()
         self._unregister_hotkeys()

@@ -4,6 +4,7 @@ OCR через Tesseract. Нужен, когда состояние нельзя
 и т.п.). Использовать точечно — OCR медленный по сравнению с CV.
 """
 import re
+import time
 
 import cv2
 import numpy as np
@@ -11,6 +12,7 @@ import pytesseract
 
 import config
 from logic import settings
+from vision import digits
 
 if config.TESSERACT_CMD:
     pytesseract.pytesseract.tesseract_cmd = config.TESSERACT_CMD
@@ -132,34 +134,63 @@ def _parse_number(raw):
     None — если чисел нет.
     """
     s = raw.strip()
+    # приоритет — явный формат «тек/макс»
     m = re.search(r"(\d+)\s*/\s*(\d+)", s)
     if m:
         mx = int(m.group(2))
         return int(m.group(1)), (mx if mx > 0 else None)
-    m2 = re.search(r"\d+", s)
-    if m2:
-        return int(m2.group(0)), None
+    # OCR мог потерять тонкий штрих «/» (увидел «1500 3000» / «15003000» слитно).
+    # Если чисел ДВА — считаем их «тек» и «макс».
+    nums = re.findall(r"\d+", s)
+    if len(nums) >= 2:
+        mx = int(nums[1])
+        return int(nums[0]), (mx if mx > 0 else None)
+    if len(nums) == 1:
+        return int(nums[0]), None
     return None
 
 
-def read_number(frame, region):
-    """
-    Прочитать число(а) из прямоугольной области экрана.
-    Возврат: (current, maximum|None) или None, если ничего не распозналось.
-
-    Текст на барах L2 светлый — выделяем яркие пиксели порогом NAME_BRIGHT,
-    инвертируем (тёмное на белом — так tesseract точнее) и читаем с белым
-    списком только цифр и «/».
-    """
+def _read_number_tesseract(frame, region):
+    """Сырой текст числа из региона через Tesseract (медленно, ~333мс). '' если пусто."""
     crop = _crop_region(frame, region)
     if crop is None or crop.size == 0:
-        return None
+        return ""
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=_NUM_SCALE, fy=_NUM_SCALE,
                       interpolation=cv2.INTER_CUBIC)
     _, br = cv2.threshold(gray, config.NAME_BRIGHT, 255, cv2.THRESH_BINARY)
     img = cv2.bitwise_not(br)
-    raw = pytesseract.image_to_string(
+    return pytesseract.image_to_string(
         img, lang="eng",
-        config="--psm 7 -c tessedit_char_whitelist=0123456789/")
-    return _parse_number(raw)
+        config="--psm 7 -c tessedit_char_whitelist=0123456789/").strip()
+
+
+# Троттлинг медленного Tesseract-отката: даже если быстрый распознаватель не
+# смог, НЕ зовём Tesseract на каждом кадре (иначе нераспознаваемый бар стопорит
+# цикл на 333мс каждый тик). Зовём изредка — только чтобы дообучить эталоны.
+_last_tess = 0.0
+_TESS_LEARN_GAP = 2.0        # сек между попытками дообучения через Tesseract
+
+
+def read_number(frame, region):
+    """
+    Прочитать число(а) из региона. Возврат: (current, maximum|None) или None.
+
+    Сначала — БЫСТРЫЙ распознаватель цифр по эталонам (~1мс, vision.digits).
+    Если встретился незнакомый глиф — РЕДКО (раз в _TESS_LEARN_GAP) дочитываем
+    медленным Tesseract и обучаем эталоны; между попытками возвращаем None,
+    чтобы не стопорить цикл (вызывающий возьмёт последнее значение/заливку).
+    """
+    global _last_tess
+    text, norms = digits.read(frame, region)
+    if text is not None:
+        return _parse_number(text)
+    now = time.monotonic()
+    if now - _last_tess < _TESS_LEARN_GAP:
+        return None                       # не мучаем Tesseract каждый кадр
+    _last_tess = now
+    raw = _read_number_tesseract(frame, region)
+    if raw:
+        digits.learn(norms, raw)          # запоминаем начертания для быстрого пути
+        return _parse_number(raw)
+    return None

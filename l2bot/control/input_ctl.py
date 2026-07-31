@@ -13,6 +13,7 @@ import time
 import pydirectinput
 
 import config
+from control import arduino_link
 
 # Отключаем встроенную паузу pydirectinput между вызовами — управляем сами.
 pydirectinput.PAUSE = 0.0
@@ -41,6 +42,55 @@ def emit(message):
             pass
 
 
+# ---------------------------------------------------------------------------
+# ВЫБОР БЭКЕНДА ВВОДА: Arduino (аппаратный HID) или Windows (pydirectinput).
+# ---------------------------------------------------------------------------
+_arduino_init_done = False   # попытку подключения к Arduino делаем один раз
+
+
+def _arduino():
+    """
+    Вернуть подключённый ArduinoLink, если бэкенд это разрешает и связь есть;
+    иначе None (вызывающий уйдёт на ввод Windows, если бэкенд != 'arduino').
+    Подключение пробуем ОДИН раз (open+reset занимает ~2 c) и запоминаем итог.
+    """
+    global _arduino_init_done
+    backend = getattr(config, "INPUT_BACKEND", "auto")
+    if backend == "windows":
+        return None
+    link = arduino_link.get_link()
+    if link.is_connected():
+        return link
+    if not _arduino_init_done:
+        _arduino_init_done = True
+        if link.connect():
+            emit("Arduino-мост ввода подключён (%s)" % link.port)
+        else:
+            emit("Arduino не найден — ввод через Windows" if backend == "auto"
+                 else "Arduino не найден, а бэкенд 'arduino' — ввод не отправляется")
+    return link if link.is_connected() else None
+
+
+def reconnect_arduino():
+    """Сбросить флаг и попытаться переподключиться (для кнопки в панели)."""
+    global _arduino_init_done
+    _arduino_init_done = False
+    arduino_link.get_link().close()
+    return _arduino() is not None
+
+
+def _set_cursor(x, y):
+    """Поставить системный курсор в точку (для клика Arduino по абсолютным коорд.)."""
+    try:
+        ctypes.windll.user32.SetCursorPos(int(x), int(y))
+    except Exception:
+        pass
+
+
+def _backend_is_arduino_only():
+    return getattr(config, "INPUT_BACKEND", "auto") == "arduino"
+
+
 def cooldown_remaining(action_name):
     """Сколько ещё секунд ждать до готовности действия (0.0 — готово)."""
     return max(0.0, _ready_at.get(action_name, 0.0) - time.monotonic())
@@ -67,7 +117,17 @@ def sleep(seconds):
 
 
 def press_key(key):
-    """Нажать и отпустить клавишу с человекоподобным удержанием."""
+    """
+    Нажать и отпустить клавишу. Через Arduino (аппаратный HID) — если бэкенд
+    позволяет и мост подключён; иначе обычный ввод Windows (pydirectinput).
+    Удержание при Arduino задаётся в скетче (человекоподобное).
+    """
+    a = _arduino()
+    if a is not None:
+        a.key(str(key))
+        return
+    if _backend_is_arduino_only():
+        return                      # требовали только Arduino, а его нет — не шлём
     hold = random.uniform(config.KEY_PRESS_MIN, config.KEY_PRESS_MAX)
     pydirectinput.keyDown(key)
     time.sleep(hold)
@@ -126,7 +186,22 @@ def move_mouse(x, y, duration=0.15):
 
 
 def click(x=None, y=None, button="left"):
-    """Клик (опционально с предварительным перемещением)."""
+    """
+    Клик (опц. с предварительным перемещением). Через Arduino: ставим курсор в
+    точку системно (SetCursorPos), а сам клик шлём аппаратно (игра принимает).
+    """
+    a = _arduino()
+    if a is not None:
+        if x is not None and y is not None:
+            _set_cursor(x, y)
+            sleep(0.05)
+        if button == "right":
+            a.rclick()
+        else:
+            a.click()
+        return
+    if _backend_is_arduino_only():
+        return
     if x is not None and y is not None:
         move_mouse(x, y)
         sleep(0.05)
@@ -171,6 +246,18 @@ def camera_drag(dx, dy=0, center=None, duration=None):
     if duration is None:
         duration = config.CAMERA_STEP_DURATION
     cx, cy = center if center else _screen_center()
+
+    # Arduino: ставим курсор в точку реколибровки системно, а поворот (зажатая
+    # ПКМ + плавный сдвиг) отдаём аппаратному мосту — сглаживание уже в скетче.
+    a = _arduino()
+    if a is not None:
+        _set_cursor(cx, cy)
+        time.sleep(_jittered(config.CAMERA_SETTLE))
+        a.drag(int(dx), int(dy), int(max(0.04, duration) * 1000))
+        return
+    if _backend_is_arduino_only():
+        return
+
     pydirectinput.moveTo(int(cx), int(cy))
 
     # Человекоподобный свайп (по мотивам smoothMove из прошивки LA2Pixel):

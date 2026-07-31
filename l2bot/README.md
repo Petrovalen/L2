@@ -85,6 +85,6 @@ python main.py
 Все пороги и тайминги — в `config.py`:
 - `HP_HEAL_THRESHOLD`, `MP_MIN_THRESHOLD` — когда пить/хилиться.
 - `ATTACK_TIMEOUT` — максимум времени на одну цель (если моб убегает/недостижим).
-- `LOOT_TIME` — сколько собирать лут после смерти цели.
+- `LOOT_PRESSES_MIN/MAX`, `LOOT_PRESS_INTERVAL` — серия нажатий «подобрать» после смерти цели.
 - `KEY_PRESS_*`, `HUMANIZE_JITTER` — «очеловечивание» ввода.
 ```

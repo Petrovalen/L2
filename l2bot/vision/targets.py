@@ -153,7 +153,7 @@ def scan_nameplates(frame, region, names=None):
     for (bx, by, bw, bh) in _find_plate_boxes(sub):
         left = region["left"] + bx
         top = region["top"] + by
-        cx = left + bw // 2
+        cx = left + bw // 2 + config.NAME_CLICK_DX
         cy = top + bh + config.NAME_CLICK_DY
         d2 = (cx - ax) ** 2 + (cy - ay) ** 2
         cand.append((d2, bx, by, bw, bh, left, top, cx, cy))
@@ -459,6 +459,65 @@ def locate_buff(frame, region, label):
     return float(maxv), (left, top, int(tw), int(th))
 
 
+# ---------------------------------------------------------------------------
+# Готовность скилла по иконке хотбара: сравниваем текущий вид иконки с эталоном
+# «скилл готов». На откате иконка затемнена/с наложением -> совпадение падает.
+# ---------------------------------------------------------------------------
+def skill_template_path(key):
+    return os.path.join(_TEMPLATE_DIR, "skill_ready_" + _sanitize(str(key)) + ".png")
+
+
+def save_skill_template(frame, region, key):
+    """Снять эталон «скилл готов» из зоны иконки хотбара (grayscale)."""
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    x = region["left"] - rgn["left"]; y = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, x); y0 = max(0, y)
+    x1 = min(w, x + region["width"]); y1 = min(h, y + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    os.makedirs(_TEMPLATE_DIR, exist_ok=True)
+    path = skill_template_path(key)
+    ok = _imwrite(path, gray)
+    _template_cache.pop(path, None)
+    return bool(ok)
+
+
+def delete_skill_template(key):
+    path = skill_template_path(key)
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+    _template_cache.pop(path, None)
+
+
+def skill_ready(frame, region, key, threshold=None):
+    """
+    Готов ли скилл: похож ли текущий вид его иконки на эталон «готов».
+    True — готов (или проверка не настроена: нет эталона/зоны — не блокируем).
+    """
+    tpl = _load_template(skill_template_path(key))
+    if tpl is None or not region:
+        return True
+    threshold = config.SKILL_READY_THRESHOLD if threshold is None else threshold
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    ox = region["left"] - rgn["left"]; oy = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, ox); y0 = max(0, oy)
+    x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return True
+    crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    th, tw = tpl.shape[:2]
+    if th > crop.shape[0] or tw > crop.shape[1]:
+        return True
+    res = cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED)
+    return float(res.max()) >= threshold
+
+
 def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
     """
     Общий матчинг шаблонов ников на УЖЕ вырезанной области зоны поиска `crop`
@@ -490,7 +549,7 @@ def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
         for (mx, my) in zip(xs, ys):
             left = region["left"] + int(mx)
             top = region["top"] + int(my)
-            cx = left + tw // 2
+            cx = left + tw // 2 + config.NAME_CLICK_DX
             cy = top + th + config.NAME_CLICK_DY
             hits.append({"box": (left, top, int(tw), int(th)),
                          "x": cx, "y": cy, "name": name,

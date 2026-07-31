@@ -14,12 +14,13 @@
   COMBAT  — цель есть. Спамим атаку, пока цель жива и не вышел таймаут.
   LOOT    — цель умерла. Жмём pickup некоторое время, потом обратно в SEARCH.
 """
+import random
 import time
 
 import config
 from vision import bars, targets, ocr
 from control import input_ctl as ctl
-from logic import mob_list, settings
+from logic import mob_list, settings, notify
 
 SEARCH = "SEARCH"
 COMBAT = "COMBAT"
@@ -38,7 +39,19 @@ class BotFSM:
         self._last_name_check = 0.0     # последняя проверка имени цели (фильтр)
         self._vision_pending = False    # после вижн-клика ждём подтверждения цели
         self._wrong_target_count = 0    # подряд выбран не тот моб (некст-таргетом)
+        self._last_target_hp = None     # последнее прочитанное HP цели (для «0 = убит»)
+        self._target_alive_seen = False # видели ли текущую цель живой (защита от кэша)
+        self._loot_presses = 0          # сколько раз нажали «подобрать» за текущий лут
+        self._last_loot_press = 0.0     # момент последнего нажатия «подобрать»
+        self._loot_target = 0           # цель по числу нажатий (случайно 4-5 за лут)
+        self._loot_ref_sig = None       # сигнатура кадра на момент прошлого нажатия
+        self._loot_still = 0            # сколько нажатий подряд без движения персонажа
+        self._low_hp_since = None       # с какого момента HP критически низкое
+        self._death_notified = False    # уже уведомили о смерти (не спамить)
+        self._cp_low_since = None       # с какого момента CP ниже порога (пробит)
+        self._cp_notified = False       # уже уведомили о пробитом CP (не спамить)
         self._last_camera = 0.0         # последний поворот камеры (активный поиск)
+        self._camera_step = 0           # счётчик поворотов (для верт. свинга)
         self._target_hp_best = None     # минимальное HP цели за бой (прогресс урона)
         self._last_damage_at = 0.0      # когда последний раз HP цели упало
         self._last_click = None         # последняя точка вижн-клика (для «избегания»)
@@ -50,6 +63,7 @@ class BotFSM:
         self._last_visible_check = 0.0  # последняя проверка «цель в кадре»
         self._view_lost_since = None    # с какого момента цель не видно в кадре
         self._last_view_rotate = 0.0    # последний доворот камеры к цели
+        self._target_seen = False       # цель хоть раз попадала в кадр за этот бой
 
     # ---- вспомогательные проверки ---------------------------------------
     def _survival(self, self_bars):
@@ -75,6 +89,45 @@ class BotFSM:
                     acted = True
         return acted
 
+    def _check_death(self, hp, now):
+        """Уведомить в Telegram, если персонаж мёртв (HP держится ~0). Один раз;
+        сбрасывается после восстановления HP (ожил/подлечился)."""
+        if not config.DEATH_NOTIFY or hp is None:
+            return
+        if hp > config.DEATH_HP_PERCENT:
+            self._low_hp_since = None
+            if hp > 20:                     # HP восстановилось -> можно уведомить снова
+                self._death_notified = False
+            return
+        if self._low_hp_since is None:
+            self._low_hp_since = now
+        elif (now - self._low_hp_since >= config.DEATH_CONFIRM_SEC
+              and not self._death_notified):
+            self._death_notified = True
+            notify.send_telegram(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID,
+                                 "⚠️ L2: персонаж погиб (HP=0).")
+            ctl.emit("СМЕРТЬ — отправлено уведомление в Telegram")
+
+    def _check_cp(self, cp, now):
+        """Уведомить в Telegram, если CP «пробит» (перестал быть полным) — по
+        персонажу бьют. Один раз; сбрасывается после восстановления CP до полного."""
+        if not config.CP_NOTIFY or cp is None:
+            return
+        if cp >= config.CP_FULL_PERCENT:        # CP снова полный -> сброс
+            self._cp_low_since = None
+            self._cp_notified = False
+            return
+        if cp > config.CP_ALERT_PERCENT:        # между «полным» и порогом — не трогаем
+            return
+        if self._cp_low_since is None:
+            self._cp_low_since = now
+        elif (now - self._cp_low_since >= config.CP_CONFIRM_SEC
+              and not self._cp_notified):
+            self._cp_notified = True
+            notify.send_telegram(config.TELEGRAM_TOKEN, config.TELEGRAM_CHAT_ID,
+                                 "⚠️ L2: CP пробит (%d%%) — возможно, атакуют." % int(cp))
+            ctl.emit("CP пробит (%d%%) — уведомление в Telegram" % int(cp))
+
     # ---- один тик автомата ----------------------------------------------
     def tick(self, frame, now):
         self_bars = bars.read_self_bars(frame)
@@ -82,6 +135,8 @@ class BotFSM:
 
         # 1) выживание — вне зависимости от состояния
         self._survival(self_bars)
+        self._check_death(self_bars.get("hp"), now)
+        self._check_cp(self_bars.get("cp"), now)
 
         # 2) машина состояний
         if self.state == SEARCH:
@@ -89,12 +144,13 @@ class BotFSM:
         elif self.state == COMBAT:
             self._on_combat(frame, self_bars, target_present, target_hp, now)
         elif self.state == LOOT:
-            self._on_loot(now)
+            self._on_loot(frame, now)
 
         return {
             "state": self.state,
             "hp": self_bars.get("hp"),
             "mp": self_bars.get("mp"),
+            "cp": self_bars.get("cp"),
             "target": target_present,
             "target_hp": target_hp,
         }
@@ -169,8 +225,20 @@ class BotFSM:
                 and now - self._search_started > config.SEARCH_CAMERA_AFTER
                 and now - self._last_camera >= config.CAMERA_INTERVAL):
             self._last_camera = now
-            ctl.emit("поворот камеры (поиск целей)")
-            ctl.camera_drag(config.CAMERA_DRAG_DISTANCE, center=self._camera_anchor())
+            self._camera_step += 1
+            anchor = self._camera_anchor()
+            every = max(1, config.CAMERA_VERTICAL_EVERY)
+            if config.CAMERA_VERTICAL_SWING and self._camera_step % every == 0:
+                # вертикальный свинг: наклон обзора вверх/вниз (мобы по склону),
+                # чередуем направление
+                dy = config.CAMERA_VERTICAL_SWING
+                if (self._camera_step // every) % 2 == 0:
+                    dy = -dy
+                ctl.emit("камера: вертикальный обзор")
+                ctl.camera_drag(0, dy, center=anchor)
+            else:
+                ctl.emit("поворот камеры (поиск целей)")
+                ctl.camera_drag(config.CAMERA_DRAG_DISTANCE, center=anchor)
 
     def _camera_anchor(self):
         """
@@ -227,8 +295,19 @@ class BotFSM:
                    or targets.find_named_mobs(frame, names, region))
         if visible:
             self._view_lost_since = None
+            self._target_seen = True         # цель хоть раз попала в кадр
             return
-        # ника нужного моба в кадре нет
+        # цель ещё НИ РАЗУ не видели в этом бою (взяли некст-таргетом вне экрана)
+        # -> она точно за кадром, крутим СРАЗУ (без выжидания), только соблюдаем
+        # интервал между поворотами.
+        if not self._target_seen:
+            if now - self._last_view_rotate >= config.CAMERA_INTERVAL:
+                self._last_view_rotate = now
+                ctl.emit("цель вне экрана — ищу камерой")
+                ctl.camera_drag(config.CAMERA_DRAG_DISTANCE, center=self._camera_anchor())
+            return
+        # цель видели и потеряли мельком (перекрытие/дрожь детекции) — терпим,
+        # чтобы не крутить камеру в обычном бою.
         if self._view_lost_since is None:
             self._view_lost_since = now
             return
@@ -284,9 +363,12 @@ class BotFSM:
         self._target_lost_since = None
         self._target_hp_best = None      # сброс сторожа прогресса урона
         self._last_damage_at = now
+        self._last_target_hp = None      # HP новой цели ещё не читали
+        self._target_alive_seen = False  # новую цель ещё не видели живой (защита от кэша)
         self._used_once = set()          # «раз за цель» — заново для новой цели
         self._view_lost_since = None     # сброс сторожа видимости цели
         self._last_visible_check = 0.0
+        self._target_seen = False        # новую цель ещё не видели в кадре
         # человеческая реакция + запуск автоатаки (один раз, бьётся до смерти).
         ctl.reaction_delay()
         ctl.press_action("attack", respect_cooldown=False)
@@ -295,20 +377,39 @@ class BotFSM:
         # Фиксируемся на цели: одиночные сбойные кадры (цель «мигнула») не
         # выкидывают из боя. В лут уходим, только если цель пропала стабильно
         # дольше TARGET_LOST_GRACE — тогда считаем её мёртвой.
+        # СМЕРТЬ = HP цели РОВНО 0 (по числу). Труп ещё показывает «0/макс».
+        # Только если моба уже видели ЖИВЫМ в этом бою (защита от устаревшего 0 из
+        # кэша). Число читаем лишь когда цель уже почти мертва/пропала — не каждый
+        # тик зря (заливка низкая или бара нет).
         if target_present:
             self._target_lost_since = None
+            if target_hp is not None:
+                self._last_target_hp = target_hp      # запоминаем HP цели
+                if target_hp > config.TARGET_DEAD_HP:
+                    self._target_alive_seen = True    # видели этого моба ЖИВЫМ
+            near_death = (target_hp is None or target_hp <= config.TARGET_DEAD_HP)
+            if (self._target_alive_seen and near_death
+                    and self._target_hp_zero(frame)):
+                self._enter_loot(now)                 # HP цели = 0 -> труп
+                return
             self._keep_target_visible(frame, now)   # доводим камеру, если моб вне кадра
         else:
+            # Бар цели пуст. Мёртв, только если ЧИСЛО HP = 0 (труп «0/макс»).
+            if self._target_alive_seen and self._target_hp_zero(frame):
+                self._enter_loot(now)
+                return
+            # Ноль числом не подтверждён, а цель пропала: ждём грейс от миганий.
             if self._target_lost_since is None:
                 self._target_lost_since = now
             elif now - self._target_lost_since > config.TARGET_LOST_GRACE:
-                # моб убит: его ник ещё виден (труп) — не даём вижн-поиску сразу
-                # кликнуть по нему как по «ближайшему»
-                if self._last_click is not None:
-                    self._avoid_point = self._last_click
-                    self._avoid_until = now + config.KILL_AVOID_SEC
-                self.state = LOOT
-                self._loot_started = now
+                # Труп мог исчезнуть до чтения нуля: если HP был у самого нуля —
+                # лутаем как труп; иначе цель просто потеряна (окклюзия/сброс) —
+                # бросаем без лута (не считаем мёртвой при ненулевом HP).
+                if (self._last_target_hp is not None
+                        and self._last_target_hp <= config.TARGET_DEAD_HP):
+                    self._enter_loot(now)
+                else:
+                    self._give_up_target(now, "цель потеряна (HP не 0)")
                 return
         # сторож прогресса урона: HP цели должно падать. Если за NO_DAMAGE_TIMEOUT
         # оно не упало на MIN_DAMAGE_PERCENT — бьём «в никуда» (препятствие / вне
@@ -328,8 +429,9 @@ class BotFSM:
             self._give_up_target(now, "таймаут боя")
             return
         # способности: кастуем те, чьи условия (HP цели / своя MP) выполнены.
+        # HP цели — процент по цифрам «тек/макс» (напр. 1500/3000 -> 50%).
         # Скилл прерывает автоатаку -> сразу после него возобновляем её.
-        if self._use_skills(self_bars, target_hp):
+        if self._use_skills(frame, self_bars, target_hp):
             ctl.press_action("attack", respect_cooldown=False)
         else:
             # страховка: если автоатака оборвалась — переначинаем изредка
@@ -366,12 +468,13 @@ class BotFSM:
                             center=self._camera_anchor())
         self._to_search(now)
 
-    def _use_skills(self, self_bars, target_hp):
+    def _use_skills(self, frame, self_bars, target_hp):
         """
         Ротация: пройти список по порядку (порядок = приоритет) и применить
         ПЕРВУЮ подходящую способность. Условия:
           target_hp_above <= HP цели <= target_hp_below  И  моя MP >= mp_min
-          (и вышел кулдаун; для «once» — ещё не применялась за этот бой).
+          (и вышел кулдаун; для «once» — ещё не применялась за этот бой; если
+          задана зона иконки — скилл должен быть ГОТОВ по иконке).
         Один каст за тик — между кастами идёт автоатака. Вернуть True, если
         способность применена.
         """
@@ -391,6 +494,10 @@ class BotFSM:
             cd_key = "skill_%d" % i
             if sk.get("once") and cd_key in self._used_once:
                 continue
+            # проверка готовности по иконке (если настроена зона)
+            rr = sk.get("ready_region")
+            if rr and not targets.skill_ready(frame, rr, sk["key"]):
+                continue
             if ctl.press_skill(cd_key, sk["key"], sk.get("cooldown", 4.0)):
                 if sk.get("once"):
                     self._used_once.add(cd_key)
@@ -399,7 +506,82 @@ class BotFSM:
                 return True     # один каст за тик; далее возобновляется автоатака
         return False
 
-    def _on_loot(self, now):
-        ctl.press_action("pickup")
+    def _target_hp_zero(self, frame):
+        """
+        HP цели РОВНО 0 по ЧИСЛУ? Труп ещё показывает «0/макс», поэтому смерть
+        определяем по прочитанному числу (а не по заливке: пустой бар не отличить
+        от «цель потеряна»). True только если цифры цели читаются и текущее = 0.
+        """
+        if not self._target_hp_is_digit():
+            return False
+        spec = settings.get("bar_target")
+        if not spec:
+            return False
+        try:
+            parsed = ocr.read_number(frame, spec)
+        except Exception:
+            return False
+        return bool(parsed) and parsed[0] == 0
+
+    def _target_hp_is_digit(self):
+        """HP цели читается ЧИСЛОМ (режим цифр включён для цели)?"""
+        d = settings.get("bar_target_digits")
+        return bool(d and d.get("enabled"))
+
+    def _enter_loot(self, now):
+        """Перейти к сбору лута: труп ещё виден — гасим вижн-клик по его точке."""
+        if self._last_click is not None:
+            self._avoid_point = self._last_click
+            self._avoid_until = now + config.KILL_AVOID_SEC
+        self.state = LOOT
+        self._loot_started = now
+        self._loot_presses = 0
+        self._last_loot_press = 0.0
+        self._loot_target = random.randint(config.LOOT_PRESSES_MIN,
+                                           config.LOOT_PRESSES_MAX)
+        self._loot_ref_sig = None
+        self._loot_still = 0
+
+    def _on_loot(self, frame, now):
+        # Жмём «подобрать» ПО ОДНОМУ разу за LOOT_PRESS_INTERVAL (а не серией):
+        # между нажатиями персонаж успевает добежать до предмета и поднять его.
+        if now - self._last_loot_press >= config.LOOT_PRESS_INTERVAL:
+            if config.LOOT_MOVE_DETECT:
+                self._loot_press_by_movement(frame, now)
+            else:
+                if ctl.press_action("pickup", respect_cooldown=False):
+                    self._loot_presses += 1
+                self._last_loot_press = now
+                if self._loot_presses >= self._loot_target:
+                    self._to_search(now)
+                    return
+        # общий потолок времени сбора лута (страховка в обоих режимах)
         if now - self._loot_started > config.LOOT_TIME:
+            self._to_search(now)
+
+    def _loot_press_by_movement(self, frame, now):
+        """
+        Умный лут: после нажатия «подобрать» персонаж бежит к предмету — мир в
+        зоне поиска прокручивается (движение). Если ПОСЛЕ прошлого нажатия было
+        движение — лут ещё есть, жмём дальше; если LOOT_STILL_LIMIT нажатий
+        подряд без движения — предметов больше нет, выходим.
+        """
+        sig = bars.world_signature(frame)
+        if self._loot_presses > 0:
+            moved = (bars.signature_diff(sig, self._loot_ref_sig)
+                     > config.LOOT_MOVE_THRESHOLD)
+            if moved:
+                self._loot_still = 0                 # двигался — лут собирается
+            else:
+                self._loot_still += 1
+                if self._loot_still >= config.LOOT_STILL_LIMIT:
+                    ctl.emit("лут собран (движения нет) — %d нажатий" % self._loot_presses)
+                    self._to_search(now)
+                    return
+        if ctl.press_action("pickup", respect_cooldown=False):
+            self._loot_presses += 1
+        self._loot_ref_sig = sig                     # кадр на момент этого нажатия
+        self._last_loot_press = now
+        if self._loot_presses >= config.LOOT_MAX_PRESSES:
+            ctl.emit("лут: достигнут потолок нажатий")
             self._to_search(now)

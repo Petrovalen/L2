@@ -61,6 +61,39 @@ def _fill_edge(col_density):
     return float(dense.max() + 1) / col_density.size
 
 
+# ---------------------------------------------------------------------------
+# Детекция ДВИЖЕНИЯ персонажа (для умного сбора лута): когда персонаж бежит к
+# предмету, мир в зоне поиска прокручивается — большая разница между кадрами.
+# Берём уменьшенную ч/б «сигнатуру» зоны поиска и сравниваем средним модулем
+# разницы. Стоит на месте — разница мелкая (только анимации), бежит — крупная.
+# ---------------------------------------------------------------------------
+def world_signature(frame, size=28):
+    """Уменьшенная (size×size) ч/б сигнатура зоны поиска (или центра кадра)."""
+    spec = settings.get("search_region")
+    h, w = frame.shape[:2]
+    if spec:
+        rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+        x = spec["left"] - rgn["left"]; y = spec["top"] - rgn["top"]
+        x0 = max(0, x); y0 = max(0, y)
+        x1 = min(w, x + spec["width"]); y1 = min(h, y + spec["height"])
+        if x1 <= x0 or y1 <= y0:
+            return None
+        crop = frame[y0:y1, x0:x1]
+    else:
+        crop = frame[h // 4:3 * h // 4, w // 4:3 * w // 4]   # центр как запас
+    if crop.size == 0:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return cv2.resize(gray, (size, size), interpolation=cv2.INTER_AREA)
+
+
+def signature_diff(a, b):
+    """Средний модуль разницы двух сигнатур (0..255). Больше = сильнее движение."""
+    if a is None or b is None:
+        return 0.0
+    return float(np.mean(np.abs(a.astype(np.int16) - b.astype(np.int16))))
+
+
 def _fill_ratio(frame, x1, x2, y, color, tol):
     """
     Уровень заполнения полоски (0..1) на отрезке [x1,x2] вокруг линии y.
@@ -157,11 +190,18 @@ def _digit_percent(frame, name, region, max_manual):
     global _last_ocr_mono
     now = time.monotonic()
     prev = _digit_cache.get(name)
-    if prev and now - prev[0] < config.DIGIT_OCR_INTERVAL:
+    # Бар ЦЕЛИ — приоритетный: свой короткий интервал и БЕЗ общей очереди
+    # (не ждём DIGIT_OCR_MIN_GAP и не занимаем слот), чтобы HP цели обновлялось
+    # часто и порог скилла ловился точнее. Остальные бары — по очереди, как раньше.
+    is_target = (name == "target")
+    interval = (config.DIGIT_OCR_INTERVAL_TARGET if is_target
+                else config.DIGIT_OCR_INTERVAL)
+    if prev and now - prev[0] < interval:
         return prev[1]
-    if now - _last_ocr_mono < config.DIGIT_OCR_MIN_GAP:
-        return prev[1] if prev else None     # в этот тик уже читался другой бар
-    _last_ocr_mono = now
+    if not is_target:
+        if now - _last_ocr_mono < config.DIGIT_OCR_MIN_GAP:
+            return prev[1] if prev else None  # в этот тик уже читался другой бар
+        _last_ocr_mono = now
     percent = None
     try:
         parsed = ocr.read_number(frame, region)
