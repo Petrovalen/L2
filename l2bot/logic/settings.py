@@ -70,6 +70,7 @@ _CONFIG_OVERRIDES = {
     "camera_arc": "CAMERA_ARC",
     "camera_settle": "CAMERA_SETTLE",
     "hotkey_stop": "HOTKEY_STOP",
+    "assist_mode": "ASSIST_MODE",
 }
 
 
@@ -104,19 +105,41 @@ def _normalize(data):
     return data
 
 
+# Кэш распарсенного файла в памяти. get() зовётся десятками раз за тик бота и
+# из потока оверлея — без кэша это был бы дисковый read+json.parse на каждый
+# вызов (тормозило цикл и редко обновляло рамки мобов). Инвалидация — по mtime
+# файла (внешняя правка подхватится) и явным сбросом в save().
+_cache = None
+_cache_key = None
+
+
 def load():
-    """Прочитать настройки (нормализованные к профильному формату)."""
+    """Прочитать настройки (нормализованные к профильному формату). Результат
+    кэшируется в памяти; повторное чтение файла — только при изменении mtime."""
+    global _cache, _cache_key
+    try:
+        key = os.stat(_PATH).st_mtime_ns
+    except OSError:
+        key = None
+    if _cache is not None and key == _cache_key:
+        return _cache
     try:
         with open(_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, ValueError):
         data = {}
-    return _normalize(data)
+    data = _normalize(data)
+    _cache, _cache_key = data, key
+    return data
 
 
 def save(data):
+    global _cache, _cache_key
+    data = _normalize(data)
     with open(_PATH, "w", encoding="utf-8") as f:
-        json.dump(_normalize(data), f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    _cache = None            # следующий load() перечитает свежий файл
+    _cache_key = None
 
 
 # ---------------------------------------------------------------------------

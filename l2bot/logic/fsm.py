@@ -34,6 +34,8 @@ class BotFSM:
         self._loot_started = 0.0
         self._search_started = None   # когда вошли в поиск цели
         self._last_vision = 0.0       # последняя попытка визуального поиска
+        self._last_assist = 0.0       # последний ассист (режим ассиста)
+        self._assist_gap = 0.0        # текущий СЛУЧАЙНЫЙ интервал до след. ассиста
         self._target_lost_since = None  # с какого момента цель пропала (в бою)
         self._acquire_lock_until = 0.0  # до этого времени не перевыбираем цель
         self._last_name_check = 0.0     # последняя проверка имени цели (фильтр)
@@ -46,6 +48,7 @@ class BotFSM:
         self._loot_target = 0           # цель по числу нажатий (случайно 4-5 за лут)
         self._loot_ref_sig = None       # сигнатура кадра на момент прошлого нажатия
         self._loot_still = 0            # сколько нажатий подряд без движения персонажа
+        self._loot_hp_peak = None       # пик своего HP за текущий лут (детект урона по себе)
         self._low_hp_since = None       # с какого момента HP критически низкое
         self._death_notified = False    # уже уведомили о смерти (не спамить)
         self._cp_low_since = None       # с какого момента CP ниже порога (пробит)
@@ -140,11 +143,11 @@ class BotFSM:
 
         # 2) машина состояний
         if self.state == SEARCH:
-            self._on_search(frame, target_present, now)
+            self._on_search(frame, target_present, target_hp, now)
         elif self.state == COMBAT:
             self._on_combat(frame, self_bars, target_present, target_hp, now)
         elif self.state == LOOT:
-            self._on_loot(frame, now)
+            self._on_loot(frame, self_bars, now)
 
         return {
             "state": self.state,
@@ -160,8 +163,21 @@ class BotFSM:
         self._search_started = now
         self._wrong_target_count = 0
 
-    def _on_search(self, frame, target_present, now):
+    def _on_search(self, frame, target_present, target_hp, now):
+        # Режим АССИСТА: цель берём у другого игрока, а не выбираем сами.
+        if config.ASSIST_MODE and config.KEYS.get("assist"):
+            self._on_search_assist(frame, target_present, now)
+            return
         if target_present:
+            # ПОДТВЕРЖДЕНИЕ ВИЖН-КЛИКА: реально ли взяли ЖИВОГО моба? HP выделенной
+            # цели должно быть > 0. Если цели/HP нет («клик мимо») или HP==0 (труп) —
+            # в бой НЕ входим: в пределах окна захвата ждём регистрации цели, после —
+            # сбрасываем ожидание и повторяем поиск.
+            if self._vision_pending and not (target_hp is not None and target_hp > 0):
+                if now < self._acquire_lock_until:
+                    return                       # ещё ждём регистрации цели
+                self._vision_pending = False     # окно вышло, живой цели нет
+                return
             # Проверяем имя цели, если включён фильтр ИЛИ цель только что выбрана
             # визуальным кликом (вижн-клик всегда подтверждаем перед атакой:
             # убеждаемся, что выделился именно ожидаемый моб из списка).
@@ -239,6 +255,48 @@ class BotFSM:
             else:
                 ctl.emit("поворот камеры (поиск целей)")
                 ctl.camera_drag(config.CAMERA_DRAG_DISTANCE, center=anchor)
+
+    def _on_search_assist(self, frame, target_present, now):
+        """
+        Поиск цели в РЕЖИМЕ АССИСТА: не выбираем моба сами, а берём таргет другого
+        игрока. Цикл: assist_select (выбрать игрока) -> assist (взять его цель).
+        Если ассистом взялся валидный моб из списка — в бой; если не тот (игрок/
+        босс/не из списка) — берём ассист заново. Баффы вне боя — как обычно.
+        """
+        if now < self._acquire_lock_until:
+            return                                   # ждём регистрации цели после ассиста
+        if now < self._buff_settle_until:
+            return
+        if not target_present and self._maintain_buffs(frame, now):
+            self._buff_settle_until = now + config.BUFF_CAST_SEC
+            return
+        if target_present:
+            if now - self._last_name_check < config.NAME_CHECK_INTERVAL:
+                return                               # троттлим проверку имени
+            self._last_name_check = now
+            if self._target_name_ok(frame):
+                self._enter_combat(now)              # нужный моб -> бьём
+            else:
+                ctl.emit("ассист: цель не из списка — повторяю ассист")
+                self._acquire_assist(now)            # не тот -> ассист заново
+            return
+        self._acquire_assist(now)                    # цели нет -> берём ассист
+
+    def _acquire_assist(self, now):
+        """Взять цель ассистом: выбрать игрока (assist_select) -> нажать assist.
+        Интервал повтора СЛУЧАЙНЫЙ (человекоподобно, не ровный ритм)."""
+        if now - self._last_assist < self._assist_gap:
+            return                                   # не спамим ассистом
+        self._last_assist = now
+        self._assist_gap = random.uniform(config.ASSIST_INTERVAL_MIN,
+                                           config.ASSIST_INTERVAL_MAX)
+        if config.KEYS.get("assist_select"):
+            ctl.press_action("assist_select", respect_cooldown=False)
+            ctl.sleep(config.ASSIST_SETTLE)          # дать игроку выделиться (±джиттер)
+        ctl.press_action("assist", respect_cooldown=False)
+        # окно ожидания регистрации цели — тоже слегка случайное
+        self._acquire_lock_until = now + config.ACQUIRE_LOCK * random.uniform(0.8, 1.2)
+        ctl.emit("ассист по игроку")
 
     def _camera_anchor(self):
         """
@@ -394,22 +452,24 @@ class BotFSM:
                 return
             self._keep_target_visible(frame, now)   # доводим камеру, если моб вне кадра
         else:
-            # Бар цели пуст. Мёртв, только если ЧИСЛО HP = 0 (труп «0/макс»).
+            # Бар цели пропал. СНАЧАЛА пробуем подтвердить смерть числом — труп
+            # ещё показывает «0/макс» (строгий 0 HP, если успеем прочитать).
             if self._target_alive_seen and self._target_hp_zero(frame):
                 self._enter_loot(now)
                 return
-            # Ноль числом не подтверждён, а цель пропала: ждём грейс от миганий.
+            # Ноль прочитать не успели (труп/окно исчезают мгновенно, цифры не
+            # всегда читаются). Ждём грейс от миганий детекции, затем: если моба
+            # ВИДЕЛИ ЖИВЫМ, а его окно пропало — это смерть (в L2 окно цели держится
+            # при потере линии видимости и сбрасывается только смертью/снятием цели;
+            # цель сами не снимаем, недостижимую отсекает сторож «нет урона» выше)
+            # -> идём в ЛУТ. Иначе — цель действительно потеряна.
             if self._target_lost_since is None:
                 self._target_lost_since = now
             elif now - self._target_lost_since > config.TARGET_LOST_GRACE:
-                # Труп мог исчезнуть до чтения нуля: если HP был у самого нуля —
-                # лутаем как труп; иначе цель просто потеряна (окклюзия/сброс) —
-                # бросаем без лута (не считаем мёртвой при ненулевом HP).
-                if (self._last_target_hp is not None
-                        and self._last_target_hp <= config.TARGET_DEAD_HP):
-                    self._enter_loot(now)
+                if self._target_alive_seen:
+                    self._enter_loot(now)             # моб убит -> собираем лут
                 else:
-                    self._give_up_target(now, "цель потеряна (HP не 0)")
+                    self._give_up_target(now, "цель потеряна")
                 return
         # сторож прогресса урона: HP цели должно падать. Если за NO_DAMAGE_TIMEOUT
         # оно не упало на MIN_DAMAGE_PERCENT — бьём «в никуда» (препятствие / вне
@@ -446,6 +506,8 @@ class BotFSM:
         падаем на «ближайшую» (но она часто выбирает того же моба — поэтому для
         обхода застрявшей цели ЛУЧШЕ назначить клавишу next_target).
         """
+        if config.ASSIST_MODE:
+            return   # в ассисте цель НЕ выбираем сами — в поиске возьмём ассистом
         if config.KEYS.get("next_target"):
             ctl.press_action("next_target", respect_cooldown=False)
         else:
@@ -541,8 +603,20 @@ class BotFSM:
                                            config.LOOT_PRESSES_MAX)
         self._loot_ref_sig = None
         self._loot_still = 0
+        self._loot_hp_peak = None        # пик своего HP за лут (ловим урон по себе)
 
-    def _on_loot(self, frame, now):
+    def _on_loot(self, frame, self_bars, now):
+        # По нам бьёт моб? В луте свой HP не должен падать. Если он просел ниже
+        # пика за этот лут — по персонажу бьют (а движение экрана «умный лут»
+        # ошибочно считал сбором). Выходим из лута и переизбираем цель -> в бой.
+        hp = self_bars.get("hp")
+        if hp is not None:
+            if self._loot_hp_peak is None or hp > self._loot_hp_peak:
+                self._loot_hp_peak = hp
+            elif hp <= self._loot_hp_peak - config.LOOT_INTERRUPT_HP_DROP:
+                ctl.emit("в луте бьют (HP %d%%) — возвращаюсь в бой" % int(hp))
+                self._to_search(now)     # переберём цель и вступим в бой с атакующим
+                return
         # Жмём «подобрать» ПО ОДНОМУ разу за LOOT_PRESS_INTERVAL (а не серией):
         # между нажатиями персонаж успевает добежать до предмета и поднять его.
         if now - self._last_loot_press >= config.LOOT_PRESS_INTERVAL:

@@ -10,19 +10,40 @@ _PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "mobs.json")
 
 
+# Кэш списка в памяти: load() зовётся из цикла бота и потока оверлея каждый
+# кадр — без кэша это read+json.parse на каждый вызов. Инвалидация по mtime
+# файла (+ явный сброс в save()). Наружу отдаём КОПИЮ, чтобы вызывающий
+# (add/remove) не мутировал кэш.
+_cache = None
+_cache_key = None
+
+
 def load():
-    """Вернуть список имён (уникальные, с сохранением порядка)."""
+    """Вернуть список имён (уникальные, с сохранением порядка). Кэшируется в
+    памяти; файл перечитывается только при изменении mtime."""
+    global _cache, _cache_key
+    try:
+        key = os.stat(_PATH).st_mtime_ns
+    except OSError:
+        key = None
+    if _cache is not None and key == _cache_key:
+        return list(_cache)
     try:
         with open(_PATH, encoding="utf-8") as f:
             data = json.load(f)
     except (FileNotFoundError, ValueError):
-        return []
-    return list(dict.fromkeys(str(x).strip() for x in data if str(x).strip()))
+        data = []
+    names = list(dict.fromkeys(str(x).strip() for x in data if str(x).strip()))
+    _cache, _cache_key = names, key
+    return list(names)
 
 
 def save(names):
+    global _cache, _cache_key
     with open(_PATH, "w", encoding="utf-8") as f:
         json.dump(list(names), f, ensure_ascii=False, indent=2)
+    _cache = None            # следующий load() перечитает свежий файл
+    _cache_key = None
 
 
 def add(name):

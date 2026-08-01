@@ -217,6 +217,27 @@ def scan_nameplate_boxes(frame, region):
 
 # Кэш загруженных шаблонов: путь -> grayscale-массив.
 _template_cache = {}
+# Кэш УМЕНЬШЕННЫХ шаблонов для быстрого матчинга: (путь, scale) -> массив.
+_scaled_template_cache = {}
+
+
+def _drop_scaled(path):
+    """Сбросить кэш уменьшенных копий для шаблона (при его пересохранении/удалении)."""
+    for k in [k for k in _scaled_template_cache if k[0] == path]:
+        _scaled_template_cache.pop(k, None)
+
+
+def _scaled_template(path, tpl, scale):
+    """Уменьшенная копия шаблона (кэшируется). scale=1.0 -> сам шаблон."""
+    if scale >= 0.999:
+        return tpl
+    key = (path, round(scale, 3))
+    cached = _scaled_template_cache.get(key)
+    if cached is None:
+        cached = cv2.resize(tpl, None, fx=scale, fy=scale,
+                            interpolation=cv2.INTER_AREA)
+        _scaled_template_cache[key] = cached
+    return cached
 
 
 def _imread_gray(path):
@@ -358,6 +379,7 @@ def save_name_template(frame, region, name):
     path = template_path(name)
     ok = _imwrite(path, tpl)
     _template_cache.pop(path, None)       # сбросить кэш, чтобы перечитать свежий
+    _drop_scaled(path)
     return bool(ok)
 
 
@@ -370,6 +392,7 @@ def delete_template(name):
     except OSError:
         pass
     _template_cache.pop(path, None)
+    _drop_scaled(path)
 
 
 # ---------------------------------------------------------------------------
@@ -533,22 +556,35 @@ def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
     if crop is None or crop.size == 0 or not names:
         return []
     threshold = config.TEMPLATE_NAME_THRESHOLD if threshold is None else threshold
+    scale = float(getattr(config, "VISION_MATCH_SCALE", 1.0) or 1.0)
     scene, _ = _nameplate_mask(crop)                  # маска сцены (как у шаблона)
-    sh, sw = scene.shape[:2]
+    sh, sw = scene.shape[:2]                           # полноразмерные габариты
+    # Матчим на УМЕНЬШЕННОЙ сцене: стоимость matchTemplate ~ площадь×площадь,
+    # поэтому scale=0.5 ускоряет ~в 16 раз (зона поиска бывает почти во весь
+    # экран). Координаты матча делим на scale — возвращаемся в полное разрешение.
+    scene_m = (scene if scale >= 0.999 else
+               cv2.resize(scene, None, fx=scale, fy=scale,
+                          interpolation=cv2.INTER_AREA))
+    smh, smw = scene_m.shape[:2]
     ax, ay = anchor_xy
     hits = []
     for name in names:
-        tpl = _load_template(template_path(name))
+        path = template_path(name)
+        tpl = _load_template(path)
         if tpl is None:
             continue
         th, tw = tpl.shape[:2]
         if th < 4 or tw < 6 or th > sh or tw > sw:
             continue
-        res = cv2.matchTemplate(scene, tpl, cv2.TM_CCOEFF_NORMED)
+        tpl_m = _scaled_template(path, tpl, scale)
+        tmh, tmw = tpl_m.shape[:2]
+        if tmh < 2 or tmw < 2 or tmh > smh or tmw > smw:
+            continue
+        res = cv2.matchTemplate(scene_m, tpl_m, cv2.TM_CCOEFF_NORMED)
         ys, xs = np.where(res >= threshold)
         for (mx, my) in zip(xs, ys):
-            left = region["left"] + int(mx)
-            top = region["top"] + int(my)
+            left = region["left"] + int(round(mx / scale))
+            top = region["top"] + int(round(my / scale))
             cx = left + tw // 2 + config.NAME_CLICK_DX
             cy = top + th + config.NAME_CLICK_DY
             hits.append({"box": (left, top, int(tw), int(th)),

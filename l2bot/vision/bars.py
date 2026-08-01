@@ -171,36 +171,46 @@ def _bar_spec(name):
 # Конфиг в settings: bar_<name>_digits = {"enabled": bool, "max": N|0}.
 # OCR медленный, поэтому троттлим и кэшируем результат на DIGIT_OCR_INTERVAL.
 # ---------------------------------------------------------------------------
-_digit_cache = {}       # name -> (mono_time, percent|None)
+_digit_cache = {}       # name -> (mono_time УСПЕШНОГО чтения, percent)
 _last_ocr_mono = 0.0    # момент последнего OCR любого бара (глобальный стаггер)
+
+
+def _fresh_or_none(prev, now):
+    """Отдать кэш, пока он не устарел (< DIGIT_STALE_LIMIT от последнего УСПЕШНОГО
+    чтения); иначе None — вызывающий возьмёт пиксельную заливку (обновляется всегда)."""
+    if prev and now - prev[0] < config.DIGIT_STALE_LIMIT:
+        return prev[1]
+    return None
 
 
 def _digit_percent(frame, name, region, max_manual):
     """
-    Процент (0..100) полоски по числам из OCR (из области бара `region`),
-    с троттлингом и кэшем. None — если распознать/посчитать не удалось (тогда
-    вызывающий откатится на пиксельный режим).
+    Процент (0..100) полоски по числам из OCR (из области бара `region`).
+    None — если прочитать не удалось И прошлое значение устарело: тогда
+    вызывающий откатывается на ПИКСЕЛЬНЫЙ режим (заливка обновляется каждый кадр).
 
-    Два ограничителя нагрузки (OCR = запуск процесса Tesseract, дорого):
-      * на каждый бар — не чаще DIGIT_OCR_INTERVAL (кэш между чтениями);
-      * глобально — не больше ОДНОГО распознавания за DIGIT_OCR_MIN_GAP, чтобы
-        включённые сразу несколько баров не читались в одном тике и не топили
-        цикл. Бары естественно распознаются по очереди (round-robin).
+    ВАЖНО: кэш обновляем ТОЛЬКО при успешном чтении. Иначе сбойное чтение
+    (быстрый распознаватель «всё или ничего» не взял кадр) замораживало бы бар:
+    старое значение переписывалось с новым таймстампом и «жило» бесконечно —
+    из-за этого HP цели замирал, а сторож урона бросал живого моба.
+
+    Ограничители нагрузки:
+      * на каждый бар — не чаще DIGIT_OCR_INTERVAL от последнего УСПЕХА (кэш);
+      * глобально — не больше ОДНОГО распознавания за DIGIT_OCR_MIN_GAP (бары
+        читаются по очереди, round-robin). Бар ЦЕЛИ приоритетный — свой короткий
+        интервал и без общей очереди.
     """
     global _last_ocr_mono
     now = time.monotonic()
     prev = _digit_cache.get(name)
-    # Бар ЦЕЛИ — приоритетный: свой короткий интервал и БЕЗ общей очереди
-    # (не ждём DIGIT_OCR_MIN_GAP и не занимаем слот), чтобы HP цели обновлялось
-    # часто и порог скилла ловился точнее. Остальные бары — по очереди, как раньше.
     is_target = (name == "target")
     interval = (config.DIGIT_OCR_INTERVAL_TARGET if is_target
                 else config.DIGIT_OCR_INTERVAL)
     if prev and now - prev[0] < interval:
-        return prev[1]
+        return prev[1]                    # свежее успешное значение — без чтения
     if not is_target:
         if now - _last_ocr_mono < config.DIGIT_OCR_MIN_GAP:
-            return prev[1] if prev else None  # в этот тик уже читался другой бар
+            return _fresh_or_none(prev, now)   # в этот тик уже читался другой бар
         _last_ocr_mono = now
     percent = None
     try:
@@ -212,9 +222,10 @@ def _digit_percent(frame, name, region, max_manual):
         max_val = mx or max_manual or 0          # авто «тек/макс», иначе ручной Max
         if cur is not None and max_val:
             percent = round(max(0.0, min(100.0, cur / max_val * 100.0)), 1)
-    value = percent if percent is not None else (prev[1] if prev else None)
-    _digit_cache[name] = (now, value)
-    return value
+    if percent is not None:
+        _digit_cache[name] = (now, percent)  # кэшируем ТОЛЬКО успех
+        return percent
+    return _fresh_or_none(prev, now)         # неудача: кэш ненадолго, потом пиксели
 
 
 def _digit_on(name):

@@ -39,6 +39,8 @@ ACTION_LABELS = {
     "heal_potion": "хилка",
     "mana_potion": "мана",
     "pickup": "подобрать лут",
+    "assist_select": "ассист: выбор игрока",
+    "assist": "ассист: взять цель",
 }
 
 # Действия с настраиваемой клавишей и их подписи в редакторе (порядок сохранён).
@@ -48,6 +50,8 @@ KEY_ACTIONS = [
     ("next_target", "Следующая цель (перебор — обход застрявшей)"),
     ("attack", "Атака / основной скилл"),
     ("pickup", "Подобрать лут"),
+    ("assist_select", "Ассист: выбрать игрока"),
+    ("assist", "Ассист: взять его цель"),
 ]
 
 # Дефолт новой способности при добавлении в редакторе.
@@ -697,6 +701,15 @@ class App:
         settings.set("vision_targeting", v)
         self.mob_status.set(f"Визуальный поиск: {'включён' if v else 'выключен'}")
 
+    def _on_assist_toggle(self):
+        v = bool(self.assist_mode.get())
+        config.ASSIST_MODE = v
+        settings.set("assist_mode", v)
+        self._ctrl_status.set(
+            "Режим ассиста ВКЛ — задай клавиши «выбрать игрока» и «ассист» и сохрани боевые настройки."
+            if v else "Режим ассиста выключен (бот сам выбирает цель).")
+        self._append_log("Режим ассиста: %s" % ("включён" if v else "выключен"))
+
     def _save_telegram(self):
         enabled = bool(self.tg_enabled.get())
         token = self.tg_token.get().strip()
@@ -890,8 +903,13 @@ class App:
         self._loot_presses_max_var = tk.IntVar(value=int(config.LOOT_PRESSES_MAX))
         tk.Spinbox(lootrow, from_=1, to=10, width=4,
                    textvariable=self._loot_presses_max_var).pack(side="left")
-        tk.Label(kf, text="Пусто = действие отключено.", font=("Segoe UI", 8),
-                 fg="#666", anchor="w").pack(fill="x", padx=10, pady=(0, 4))
+        self.assist_mode = tk.BooleanVar(value=config.ASSIST_MODE)
+        tk.Checkbutton(kf, text="Режим ассиста (бить по цели другого игрока, а не выбирать самому)",
+                       variable=self.assist_mode,
+                       command=self._on_assist_toggle).pack(anchor="w", padx=6, pady=(2, 0))
+        tk.Label(kf, text="Ассист: задай клавиши «выбрать игрока» и «взять его цель». "
+                          "Пусто = действие отключено.", font=("Segoe UI", 8),
+                 fg="#666", anchor="w", justify="left", wraplength=460).pack(fill="x", padx=10, pady=(0, 4))
 
         # --- лечение / банки (выживание, работает в любом состоянии) ---
         hf = ttk.LabelFrame(win, text="Лечение (пить при падении своего HP/MP)")
