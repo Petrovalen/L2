@@ -42,6 +42,7 @@ _MACHINE_KEYS = {
     "bar_hp", "bar_mp", "bar_cp", "bar_target",
     "bar_hp_digits", "bar_mp_digits", "bar_cp_digits", "bar_target_digits",
     "target_name_region", "search_region", "buff_region", "character_anchor",
+    "vision_exclude_region",
 }
 # Ключи, относящиеся к ПРОФИЛЮ ПЕРСОНАЖА (зависят от класса).
 _CHARACTER_KEYS = {"keys", "skills", "heal", "mp_potion", "buffs"}

@@ -60,6 +60,11 @@ class BotFSM:
         self._last_click = None         # последняя точка вижн-клика (для «избегания»)
         self._avoid_point = None        # точка брошенной цели, которую не кликаем
         self._avoid_until = 0.0         # до какого момента избегаем avoid_point
+        self._no_dmg_streak = 0         # подряд отказов «нет урона/таймаут» (застряли)
+        self._prefer_vision_until = 0.0 # до этого времени ищем ТОЛЬКО визуально (в обход
+                                        # target_nearest, который тянет того же недостижимого)
+        self._start_search_next = False # первый выбор в поиске — через next_target
+                                        # (после человеческой паузы: не брать труп рядом)
         self._used_once = set()         # скиллы «раз за цель», уже применённые в этом бою
         self._last_buff_check = 0.0     # последняя проверка баффов
         self._buff_settle_until = 0.0   # пауза после каста баффа (прокаст)
@@ -158,6 +163,16 @@ class BotFSM:
             "target_hp": target_hp,
         }
 
+    def resume_from_break(self, now):
+        """После человеческой паузы: начать поиск заново и ПЕРВЫМ действием взять
+        СЛЕДУЮЩУЮ цель (next_target), а не ближайшую — чтобы не переоткрыть труп
+        убитого моба или того же моба, что лежал рядом до паузы."""
+        self.state = SEARCH
+        self._search_started = now
+        self._wrong_target_count = 0
+        self._vision_pending = False
+        self._start_search_next = True
+
     def _to_search(self, now):
         self.state = SEARCH
         self._search_started = now
@@ -222,12 +237,23 @@ class BotFSM:
             self._buff_settle_until = now + config.BUFF_CAST_SEC
             return
         self._vision_pending = False    # окно ожидания вижн-цели прошло (клик мимо)
-        # 1) СНАЧАЛА обычный выбор ближайшей цели клавишей
-        ctl.press_action("target_nearest")
-        # 2) если ближняя цель не выбралась за SEARCH_VISION_AFTER — ПОДКЛЮЧАЕМ
-        #    визуальный поиск ников из белого списка (OCR, троттлинг).
+        # «Застряли» на недостижимом мобе: target_nearest тянет ТОГО ЖЕ, поэтому
+        # временно его НЕ жмём — ищем ДРУГОГО визуально (вижн-клик избегает
+        # забаненной точки недостижимого моба).
+        prefer_vision = now < self._prefer_vision_until
+        # 1) СНАЧАЛА обычный выбор цели клавишей (кроме режима «застряли»). Первый
+        #    выбор после человеческой паузы — через СЛЕДУЮЩУЮ цель (next_target),
+        #    чтобы не переоткрыть труп/того же моба рядом; далее — как обычно.
+        if not prefer_vision:
+            if self._start_search_next and config.KEYS.get("next_target"):
+                ctl.press_action("next_target", respect_cooldown=False)
+            else:
+                ctl.press_action("target_nearest")
+            self._start_search_next = False
+        # 2) если ближняя цель не выбралась за SEARCH_VISION_AFTER (или мы «застряли»)
+        #    — ПОДКЛЮЧАЕМ визуальный поиск ников из белого списка (OCR, троттлинг).
         if (config.VISION_TARGETING
-                and now - self._search_started > config.SEARCH_VISION_AFTER
+                and (prefer_vision or now - self._search_started > config.SEARCH_VISION_AFTER)
                 and now - self._last_vision >= config.VISION_INTERVAL):
             self._last_vision = now
             if self._vision_click(frame):
@@ -469,7 +495,7 @@ class BotFSM:
                 if self._target_alive_seen:
                     self._enter_loot(now)             # моб убит -> собираем лут
                 else:
-                    self._give_up_target(now, "цель потеряна")
+                    self._give_up_target(frame, now, "цель потеряна")
                 return
         # сторож прогресса урона: HP цели должно падать. Если за NO_DAMAGE_TIMEOUT
         # оно не упало на MIN_DAMAGE_PERCENT — бьём «в никуда» (препятствие / вне
@@ -481,12 +507,13 @@ class BotFSM:
             elif target_hp <= self._target_hp_best - config.MIN_DAMAGE_PERCENT:
                 self._target_hp_best = target_hp          # урон пошёл — прогресс
                 self._last_damage_at = now
+                self._no_dmg_streak = 0                    # урон пошёл — не застряли
             elif now - self._last_damage_at > config.NO_DAMAGE_TIMEOUT:
-                self._give_up_target(now, "нет урона")
+                self._give_up_target(frame, now, "нет урона", stuck=True)
                 return
         # жёсткий потолок времени боя (backstop, напр. если HP цели не читается)
         if now - self._combat_started > config.ATTACK_TIMEOUT:
-            self._give_up_target(now, "таймаут боя")
+            self._give_up_target(frame, now, "таймаут боя", stuck=True)
             return
         # способности: кастуем те, чьи условия (HP цели / своя MP) выполнены.
         # HP цели — процент по цифрам «тек/макс» (напр. 1500/3000 -> 50%).
@@ -513,20 +540,46 @@ class BotFSM:
         else:
             ctl.press_action("target_nearest", respect_cooldown=False)
 
-    def _give_up_target(self, now, reason):
+    def _nearest_nameplate(self, frame):
+        """Экранная точка НИКА ближайшего к персонажу моба (тот, что тянет
+        target_nearest). None — если ников не видно."""
+        region = settings.get("search_region")
+        names = mob_list.load()
+        if not region or not names:
+            return None
+        mobs = (targets.find_mobs_by_template(frame, names, region)
+                or targets.find_named_mobs(frame, names, region))
+        if not mobs:
+            return None
+        return (mobs[0]["x"], mobs[0]["y"])
+
+    def _give_up_target(self, frame, now, reason, stuck=False):
         """
-        Бросить цель (урон не идёт / таймаут) и не зациклиться на ней:
-        переключить цель в игре, увеличенный поворот камеры (сменить сцену),
-        кратковременный запрет вижн-клика по той же точке. Полностью проблему
-        закроет шаг с перемещением (обход препятствия), пока — эти меры.
+        Бросить цель и не зациклиться на ней. При stuck=True (недостижимый моб:
+        «нет урона»/таймаут) target_nearest будет тянуть ТОГО ЖЕ моба, поэтому:
+        запоминаем его ник как точку избегания, временно переходим на ВИЗУАЛЬНЫЙ
+        выбор (в обход target_nearest) и усиливаем поворот камеры с каждым
+        повтором, чтобы сменить сцену.
         """
         ctl.emit(f"меняю цель ({reason})")
+        turn_mult = config.STUCK_TURN_MULT
+        if stuck:
+            self._no_dmg_streak += 1
+            # запретить недостижимого моба (его ник — ближайший) и искать ДРУГОГО
+            pt = self._nearest_nameplate(frame)
+            if pt is not None:
+                self._avoid_point = pt
+                self._avoid_until = now + config.STUCK_AVOID_SEC
+            self._prefer_vision_until = now + config.STUCK_AVOID_SEC
+            turn_mult *= 1 + min(self._no_dmg_streak, 3)   # эскалация поворота
+        else:
+            self._no_dmg_streak = 0
+            if self._last_click is not None:
+                self._avoid_point = self._last_click
+                self._avoid_until = now + config.STUCK_AVOID_SEC
         self._switch_target()
-        if self._last_click is not None:
-            self._avoid_point = self._last_click
-            self._avoid_until = now + config.STUCK_AVOID_SEC
         if config.CAMERA_SEARCH:
-            ctl.camera_drag(int(config.CAMERA_DRAG_DISTANCE * config.STUCK_TURN_MULT),
+            ctl.camera_drag(int(config.CAMERA_DRAG_DISTANCE * turn_mult),
                             center=self._camera_anchor())
         self._to_search(now)
 
@@ -592,6 +645,12 @@ class BotFSM:
 
     def _enter_loot(self, now):
         """Перейти к сбору лута: труп ещё виден — гасим вижн-клик по его точке."""
+        self._no_dmg_streak = 0          # моб убит -> не застряли (сброс эскалации)
+        self._prefer_vision_until = 0.0
+        # В режиме АССИСТА лут НЕ собираем — сразу назад в поиск (берём след. ассист).
+        if config.ASSIST_MODE:
+            self._to_search(now)
+            return
         if self._last_click is not None:
             self._avoid_point = self._last_click
             self._avoid_until = now + config.KILL_AVOID_SEC

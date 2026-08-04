@@ -35,6 +35,21 @@ def _anchor_screen(frame):
     h, w = frame.shape[:2]
     return rgn["left"] + w / 2.0, rgn["top"] + h / 2.0
 
+
+def _exclude_region():
+    """
+    Зона у персонажа, где визуальный поиск ников ИГНОРИРУЕТСЯ: труп убитого моба
+    остаётся лежать рядом, и без этой зоны бот пытался бы снова выделить его ник.
+    Экранные координаты {left,top,width,height} или None (зона не задана).
+    """
+    return settings.get("vision_exclude_region")
+
+
+def _in_region(x, y, r):
+    """Точка (x,y) внутри прямоугольника r (экранные координаты)?"""
+    return bool(r and r["left"] <= x <= r["left"] + r["width"]
+                and r["top"] <= y <= r["top"] + r["height"])
+
 # Ядро для склейки букв ника в единый блок (горизонтальное «размазывание»).
 # Умеренная ширина: соединяет соседние буквы, но НЕ мостит далеко разнесённые
 # яркие пятна травы в псевдо-таблички (широкое ядро давало «сетку» на траве).
@@ -158,9 +173,12 @@ def scan_nameplates(frame, region, names=None):
         d2 = (cx - ax) ** 2 + (cy - ay) ** 2
         cand.append((d2, bx, by, bw, bh, left, top, cx, cy))
     cand.sort(key=lambda c: c[0])
+    ex = _exclude_region()                            # зона «не искать» у персонажа
 
     out = []
     for d2, bx, by, bw, bh, left, top, cx, cy in cand[:config.VISION_MAX_OCR]:
+        if _in_region(cx, cy, ex):                    # труп у персонажа — пропускаем
+            continue
         pad = 3
         scr = {
             "left": region["left"] + max(0, bx - pad),
@@ -591,6 +609,9 @@ def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
                          "x": cx, "y": cy, "name": name,
                          "score": float(res[my, mx]),
                          "_d": (cx - ax) ** 2 + (cy - ay) ** 2})
+    ex = _exclude_region()                            # зона «не искать» у персонажа
+    if ex:
+        hits = [h for h in hits if not _in_region(h["x"], h["y"], ex)]
     hits = _dedupe(hits)
     hits.sort(key=lambda hh: hh["_d"])
     for i, hh in enumerate(hits):

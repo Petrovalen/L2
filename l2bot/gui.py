@@ -166,6 +166,7 @@ class BotWorker(threading.Thread):
                         if hp < config.HP_HEAL_THRESHOLD or breaks.remaining(mono) <= 0:
                             breaks.end(mono)
                             deferred_logged = False
+                            self.fsm.resume_from_break(now)   # поиск с next_target
                             self.q.put(("resumed", None))
                             self.q.put(("log", f"— перерыв окончен. Следующий через ~{int(breaks.until_due(mono))} c —"))
                         else:
@@ -183,6 +184,12 @@ class BotWorker(threading.Thread):
                     if config.BREAKS_ENABLED and breaks.due(mono):
                         safe = (status["state"] == "SEARCH" and not status["target"]
                                 and (status["hp"] or 0) >= config.BREAK_SAFE_HP)
+                        # target_nearest в только что прошедшем тике мог выделить
+                        # моба, а status["target"] — состояние ДО нажатия. Проверяем
+                        # на СВЕЖЕМ кадре: если цель появилась — НЕ уходим в перерыв
+                        # (иначе после него бот сразу «выйдет в бой», будто не искал).
+                        if safe and bars.has_target(cap.grab())[0]:
+                            safe = False
                         if safe:
                             dur = breaks.start(mono)
                             deferred_logged = False
@@ -361,6 +368,13 @@ class App:
         self.char_btn.pack(side="left", padx=4)
         tip(self.char_btn, "Точка отсчёта «ближайшего» моба. Обведи небольшую область "
                            "на персонаже (лучше по ногам).")
+        self.exclude_btn = tk.Button(row, text="Стоп-зона (труп)",
+                                     command=self.set_exclude_region)
+        self.exclude_btn.pack(side="left", padx=4)
+        self.exclude_btn.bind("<Button-3>", lambda e: self.clear_exclude_region())
+        tip(self.exclude_btn, "Зона у персонажа, где визуальный поиск НЕ работает — "
+                              "чтобы бот не выделял труп убитого моба рядом. Обведи "
+                              "область вокруг персонажа.  ПКМ по кнопке — убрать зону.")
         self.mob_status = tk.StringVar(value="")
         tk.Label(mobframe, textvariable=self.mob_status, font=("Segoe UI", 8),
                  fg="#1565c0", anchor="w").pack(fill="x", padx=8)
@@ -644,6 +658,23 @@ class App:
         cx, cy = left + w // 2, top + h // 2
         self.mob_status.set(f"Точка персонажа задана: центр ({cx},{cy})")
         self._append_log(f"Точка персонажа (отсчёт ближайшего моба): ({cx},{cy})")
+
+    def set_exclude_region(self):
+        self._select_region(
+            "Обведи зону ВОКРУГ ПЕРСОНАЖА, где НЕ искать ников (там лежит труп "
+            "убитого моба)   Esc — отмена",
+            self._save_exclude_region)
+
+    def _save_exclude_region(self, left, top, w, h):
+        settings.set("vision_exclude_region",
+                     {"left": left, "top": top, "width": w, "height": h})
+        self.mob_status.set(f"Стоп-зона у персонажа: {w}x{h} в ({left},{top})")
+        self._append_log(f"Стоп-зона визуального поиска (труп): {w}x{h} @ ({left},{top})")
+
+    def clear_exclude_region(self):
+        settings.set("vision_exclude_region", None)
+        self.mob_status.set("Стоп-зона у персонажа убрана")
+        self._append_log("Стоп-зона визуального поиска убрана (ПКМ по кнопке).")
 
     def set_buff_region(self):
         self._select_region(
@@ -1349,6 +1380,7 @@ class App:
             ("Цель HP", settings.get("bar_target"), "#ff9100"),
             ("Имя цели", settings.get("target_name_region"), "#18ffff"),
             ("Поиск мобов", settings.get("search_region"), "#69f0ae"),
+            ("Не искать (труп)", settings.get("vision_exclude_region"), "#ff1744"),
             ("Персонаж", settings.get("character_anchor"), "#ea80fc"),
             ("Баффы", settings.get("buff_region"), "#ffffff"),
         ]
@@ -1446,6 +1478,11 @@ class App:
         if cv is None:
             return
         cv.delete("all")
+        ex = settings.get("vision_exclude_region")     # стоп-зона у персонажа
+        if ex:
+            cv.create_rectangle(ex["left"], ex["top"],
+                                ex["left"] + ex["width"], ex["top"] + ex["height"],
+                                outline="#ff1744", width=2, dash=(4, 3))
         for d in draw:
             l, t, w, h = d["box"]
             # сиреневый — ближайший моб (его бот и выберет), зелёный — прочие
