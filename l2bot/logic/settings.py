@@ -45,7 +45,7 @@ _MACHINE_KEYS = {
     "vision_exclude_region",
 }
 # Ключи, относящиеся к ПРОФИЛЮ ПЕРСОНАЖА (зависят от класса).
-_CHARACTER_KEYS = {"keys", "skills", "heal", "mp_potion", "buffs"}
+_CHARACTER_KEYS = {"keys", "skills", "heal", "mp_potion", "buffs", "rest"}
 
 _DEFAULT = "default"
 
@@ -282,5 +282,7 @@ def apply_to_config():
         config.HEAL = {**config.HEAL, **character["heal"]}
     if isinstance(character.get("mp_potion"), dict):
         config.MP_POTION = {**config.MP_POTION, **character["mp_potion"]}
+    if isinstance(character.get("rest"), dict):
+        config.REST = {**config.REST, **character["rest"]}
     if isinstance(character.get("buffs"), list):
         config.BUFFS = character["buffs"]

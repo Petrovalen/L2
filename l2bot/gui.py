@@ -56,7 +56,8 @@ KEY_ACTIONS = [
 
 # Дефолт новой способности при добавлении в редакторе.
 DEFAULT_SKILL = {"key": "", "label": "Скилл", "cooldown": 4.0,
-                 "target_hp_above": 0, "target_hp_below": 100, "mp_min": 0,
+                 "target_hp_above": 0, "target_hp_below": 100,
+                 "self_hp_above": 0, "self_hp_below": 100, "mp_min": 0,
                  "once": False, "enabled": True}
 
 WARMUP_SEC = 3          # пауза перед стартом — успеть переключиться в игру
@@ -890,6 +891,8 @@ class App:
             self._set_potion_vars(self._heal_vars, config.HEAL, "hp_percent")
         if hasattr(self, "_mppot_vars"):
             self._set_potion_vars(self._mppot_vars, config.MP_POTION, "mp_percent")
+        if hasattr(self, "_rest_vars"):
+            self._set_rest_vars(self._rest_vars, config.REST)
         # ротация скиллов (перерисовать строки из config.SKILLS)
         if hasattr(self, "_skill_vars"):
             self._skill_vars = [self._skill_to_vars({**DEFAULT_SKILL, **sk})
@@ -952,20 +955,46 @@ class App:
         self._render_potion_row(hf, "HP-банка", self._heal_vars, "HP <", "%")
         self._render_potion_row(hf, "MP-банка", self._mppot_vars, "MP <", "%")
 
+        # --- режим отдыха (присесть регениться вне боя) ---
+        rf = ttk.LabelFrame(win, text="Отдых (присесть для регена HP/MP вне боя)")
+        rf.pack(fill="x", padx=10, pady=6)
+        tip(rf, "Вне боя при низком HP/MP жмём клавишу «присесть». Как ударят — "
+                "сразу встаём и ищем цель. Отрегенились до порогов выхода — встаём.")
+        self._rest_vars = self._rest_to_vars(config.REST)
+        rr = tk.Frame(rf)
+        rr.pack(fill="x", padx=8, pady=3)
+        tk.Checkbutton(rr, variable=self._rest_vars["enabled"]).pack(side="left")
+        tk.Label(rr, text="Клавиша присесть").pack(side="left")
+        tk.Entry(rr, textvariable=self._rest_vars["key"], width=5).pack(side="left", padx=(2, 8))
+        tk.Label(rr, text="сесть если HP ≤").pack(side="left")
+        tk.Spinbox(rr, from_=0, to=99, textvariable=self._rest_vars["enter_hp"],
+                   width=4).pack(side="left", padx=1)
+        tk.Label(rr, text="или MP ≤").pack(side="left")
+        tk.Spinbox(rr, from_=0, to=99, textvariable=self._rest_vars["enter_mp"],
+                   width=4).pack(side="left", padx=1)
+        tk.Label(rr, text="   встать если HP ≥").pack(side="left")
+        tk.Spinbox(rr, from_=0, to=100, textvariable=self._rest_vars["exit_hp"],
+                   width=4).pack(side="left", padx=1)
+        tk.Label(rr, text="и MP ≥").pack(side="left")
+        tk.Spinbox(rr, from_=0, to=100, textvariable=self._rest_vars["exit_mp"],
+                   width=4).pack(side="left", padx=1)
+
         # --- способности (боевая ротация: порядок сверху вниз = приоритет) ---
         sf = ttk.LabelFrame(win, text="Ротация в бою (порядок сверху вниз = приоритет)")
         sf.pack(fill="x", padx=10, pady=6)
         hint = ("Каждый тик кастуется ПЕРВАЯ подходящая способность, между ними — автоатака.\n"
                 "HP цели от…до — каст только если HP цели в этом диапазоне % (0…100 = всегда).\n"
-                "MP ≥ — только если своя MP не ниже % (0 = без условия).  КД — не чаще раза в с.\n"
-                "«раз» — применить один раз за цель (для стартовых скиллов последовательности).")
+                "своё HP от…до — каст только если СВОЁ HP в этом диапазоне % (0…100 = всегда;\n"
+                "напр. лечащий скилл: от 0 до 50).  MP ≥ — своя MP не ниже % (0 = без условия).\n"
+                "КД — не чаще раза в с.  «раз» — один раз за цель (для стартовых скиллов).")
         tk.Label(sf, text=hint, font=("Segoe UI", 8), fg="#1565c0",
                  justify="left", anchor="w").pack(fill="x", padx=8, pady=(4, 2))
 
         head = tk.Frame(sf)
         head.pack(fill="x", padx=8)
-        for text, w in (("вкл", 3), ("Клав", 6), ("HP от %", 7), ("HP до %", 7),
-                        ("MP ≥ %", 7), ("КД", 5), ("раз", 4), ("гот", 5), ("", 8)):
+        for text, w in (("вкл", 3), ("Клав", 6), ("HP цели от", 9), ("HP цели до", 9),
+                        ("своё HP от", 9), ("своё HP до", 9), ("MP ≥ %", 7),
+                        ("КД", 5), ("раз", 4), ("гот", 5), ("", 8)):
             tk.Label(head, text=text, width=w, anchor="w",
                      font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
 
@@ -1021,6 +1050,25 @@ class App:
             "cooldown": tk.DoubleVar(value=float(cfg.get("cooldown", 3.0))),
         }
 
+    # --- режим отдыха ---
+    def _rest_to_vars(self, cfg):
+        return {
+            "enabled": tk.BooleanVar(value=bool(cfg.get("enabled", False))),
+            "key": tk.StringVar(value=str(cfg.get("key") or "")),
+            "enter_hp": tk.IntVar(value=int(cfg.get("enter_hp", 0))),
+            "enter_mp": tk.IntVar(value=int(cfg.get("enter_mp", 0))),
+            "exit_hp": tk.IntVar(value=int(cfg.get("exit_hp", 90))),
+            "exit_mp": tk.IntVar(value=int(cfg.get("exit_mp", 90))),
+        }
+
+    def _set_rest_vars(self, v, cfg):
+        v["enabled"].set(bool(cfg.get("enabled", False)))
+        v["key"].set(str(cfg.get("key") or ""))
+        v["enter_hp"].set(int(cfg.get("enter_hp", 0)))
+        v["enter_mp"].set(int(cfg.get("enter_mp", 0)))
+        v["exit_hp"].set(int(cfg.get("exit_hp", 90)))
+        v["exit_mp"].set(int(cfg.get("exit_mp", 90)))
+
     def _render_potion_row(self, parent, title, v, pct_label, pct_suffix):
         row = tk.Frame(parent)
         row.pack(fill="x", padx=8, pady=2)
@@ -1041,6 +1089,8 @@ class App:
             "key": tk.StringVar(value=str(sk.get("key") or "")),
             "target_hp_above": tk.IntVar(value=int(sk.get("target_hp_above", 0))),
             "target_hp_below": tk.IntVar(value=int(below)),
+            "self_hp_above": tk.IntVar(value=int(sk.get("self_hp_above", 0))),
+            "self_hp_below": tk.IntVar(value=int(sk.get("self_hp_below", 100))),
             "mp_min": tk.IntVar(value=int(sk.get("mp_min", 0))),
             "cooldown": tk.DoubleVar(value=float(sk.get("cooldown", 4.0))),
             "once": tk.BooleanVar(value=bool(sk.get("once", False))),
@@ -1158,9 +1208,13 @@ class App:
             tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left", padx=1)
             tk.Entry(row, textvariable=v["key"], width=5).pack(side="left", padx=1)
             tk.Spinbox(row, from_=0, to=100, textvariable=v["target_hp_above"],
-                       width=5).pack(side="left", padx=1)
+                       width=8).pack(side="left", padx=1)
             tk.Spinbox(row, from_=0, to=100, textvariable=v["target_hp_below"],
-                       width=5).pack(side="left", padx=1)
+                       width=8).pack(side="left", padx=1)
+            tk.Spinbox(row, from_=0, to=100, textvariable=v["self_hp_above"],
+                       width=8).pack(side="left", padx=1)
+            tk.Spinbox(row, from_=0, to=100, textvariable=v["self_hp_below"],
+                       width=8).pack(side="left", padx=1)
             tk.Spinbox(row, from_=0, to=100, textvariable=v["mp_min"],
                        width=5).pack(side="left", padx=1)
             tk.Spinbox(row, from_=0.0, to=600.0, increment=0.5,
@@ -1190,6 +1244,8 @@ class App:
             try:
                 above = max(0, min(100, int(v["target_hp_above"].get())))
                 below = max(0, min(100, int(v["target_hp_below"].get())))
+                s_above = max(0, min(100, int(v["self_hp_above"].get())))
+                s_below = max(0, min(100, int(v["self_hp_below"].get())))
                 mp = max(0, min(100, int(v["mp_min"].get())))
                 cd = max(0.0, float(v["cooldown"].get()))
             except (tk.TclError, ValueError):
@@ -1197,12 +1253,16 @@ class App:
                 return
             if above > below:            # защита от перепутанных границ
                 above, below = below, above
+            if s_above > s_below:
+                s_above, s_below = s_below, s_above
             skills.append({
                 "key": v["key"].get().strip(),
                 "label": f"Скилл {i}",
                 "cooldown": cd,
                 "target_hp_above": above,
                 "target_hp_below": below,
+                "self_hp_above": s_above,
+                "self_hp_below": s_below,
                 "mp_min": mp,
                 "once": bool(v["once"].get()),
                 "enabled": bool(v["enabled"].get()),
@@ -1220,6 +1280,17 @@ class App:
                      "cooldown": max(0.0, float(self._mppot_vars["cooldown"].get()))}
         except (tk.TclError, ValueError):
             self._ctrl_status.set("Проверь числовые поля лечения.")
+            return
+        # режим отдыха
+        try:
+            rest = {"enabled": bool(self._rest_vars["enabled"].get()),
+                    "key": self._rest_vars["key"].get().strip() or None,
+                    "enter_hp": max(0, min(99, int(self._rest_vars["enter_hp"].get()))),
+                    "enter_mp": max(0, min(99, int(self._rest_vars["enter_mp"].get()))),
+                    "exit_hp": max(0, min(100, int(self._rest_vars["exit_hp"].get()))),
+                    "exit_mp": max(0, min(100, int(self._rest_vars["exit_mp"].get())))}
+        except (tk.TclError, ValueError):
+            self._ctrl_status.set("Проверь числовые поля отдыха.")
             return
         # самобаффы
         buffs = []
@@ -1247,6 +1318,7 @@ class App:
         settings.set("skills", skills)
         settings.set("heal", heal)
         settings.set("mp_potion", mppot)
+        settings.set("rest", rest)
         settings.set("buffs", buffs)
         settings.set("loot_presses_min", loot_min)
         settings.set("loot_presses_max", loot_max)

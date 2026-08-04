@@ -25,6 +25,7 @@ from logic import mob_list, settings, notify
 SEARCH = "SEARCH"
 COMBAT = "COMBAT"
 LOOT = "LOOT"
+REST = "REST"
 
 
 class BotFSM:
@@ -49,6 +50,7 @@ class BotFSM:
         self._loot_ref_sig = None       # сигнатура кадра на момент прошлого нажатия
         self._loot_still = 0            # сколько нажатий подряд без движения персонажа
         self._loot_hp_peak = None       # пик своего HP за текущий лут (детект урона по себе)
+        self._rest_hp_peak = None       # пик своего HP в отдыхе (детект «по нам бьют»)
         self._low_hp_since = None       # с какого момента HP критически низкое
         self._death_notified = False    # уже уведомили о смерти (не спамить)
         self._cp_low_since = None       # с какого момента CP ниже порога (пробит)
@@ -148,11 +150,13 @@ class BotFSM:
 
         # 2) машина состояний
         if self.state == SEARCH:
-            self._on_search(frame, target_present, target_hp, now)
+            self._on_search(frame, self_bars, target_present, target_hp, now)
         elif self.state == COMBAT:
             self._on_combat(frame, self_bars, target_present, target_hp, now)
         elif self.state == LOOT:
             self._on_loot(frame, self_bars, now)
+        elif self.state == REST:
+            self._on_rest(self_bars, now)
 
         return {
             "state": self.state,
@@ -178,7 +182,56 @@ class BotFSM:
         self._search_started = now
         self._wrong_target_count = 0
 
-    def _on_search(self, frame, target_present, target_hp, now):
+    # ---- режим отдыха (присесть для регена HP/MP) -----------------------
+    def _maybe_enter_rest(self, self_bars, now):
+        """Нужно ли сесть отдыхать: включено, задана клавиша, и HP<=enter_hp ИЛИ
+        MP<=enter_mp. True — вошли в отдых."""
+        r = config.REST
+        if not r.get("enabled") or not r.get("key"):
+            return False
+        hp = self_bars.get("hp")
+        mp = self_bars.get("mp")
+        need = False
+        if r.get("enter_hp", 0) and hp is not None and hp <= r["enter_hp"]:
+            need = True
+        if r.get("enter_mp", 0) and mp is not None and mp <= r["enter_mp"]:
+            need = True
+        if not need:
+            return False
+        ctl.press_key(r["key"])                      # присесть
+        self.state = REST
+        self._rest_hp_peak = hp
+        ctl.emit("отдых: сажусь регениться (HP %s / MP %s)"
+                 % ("?" if hp is None else "%d%%" % int(hp),
+                    "?" if mp is None else "%d%%" % int(mp)))
+        return True
+
+    def _on_rest(self, self_bars, now):
+        r = config.REST
+        hp = self_bars.get("hp")
+        mp = self_bars.get("mp")
+        # 1) по нам БЬЮТ (своё HP падает в отдыхе) -> сразу встаём и в поиск цели.
+        #    Клавишу «встать» не жмём: в L2 удар по сидящему сам поднимает.
+        if hp is not None:
+            if self._rest_hp_peak is None or hp > self._rest_hp_peak:
+                self._rest_hp_peak = hp
+            elif hp <= self._rest_hp_peak - config.REST_ATTACK_DROP:
+                ctl.emit("отдых прерван — по мне бьют (HP %d%%)" % int(hp))
+                self._to_search(now)
+                return
+        # 2) отрегенились (HP>=exit_hp И MP>=exit_mp) -> встаём и в поиск.
+        hp_ok = (not r.get("exit_hp")) or (hp is not None and hp >= r["exit_hp"])
+        mp_ok = (not r.get("exit_mp")) or (mp is not None and mp >= r["exit_mp"])
+        if hp_ok and mp_ok:
+            ctl.press_key(r["key"])                  # встать
+            ctl.emit("отдых окончен — HP/MP восстановлены")
+            self._to_search(now)
+
+    def _on_search(self, frame, self_bars, target_present, target_hp, now):
+        # Режим ОТДЫХА приоритетнее поиска: если цели нет и HP/MP просело — садимся
+        # регениться (на HP/MP смотрим ниже, в _maybe_enter_rest).
+        if not target_present and self._maybe_enter_rest(self_bars, now):
+            return
         # Режим АССИСТА: цель берём у другого игрока, а не выбираем сами.
         if config.ASSIST_MODE and config.KEYS.get("assist"):
             self._on_search_assist(frame, target_present, now)
@@ -595,6 +648,8 @@ class BotFSM:
         """
         mp = self_bars.get("mp")
         mp = 100.0 if mp is None else mp
+        hp = self_bars.get("hp")
+        hp = 100.0 if hp is None else hp
         thp = 100.0 if target_hp is None else target_hp
         for i, sk in enumerate(config.SKILLS):
             if not sk.get("enabled", True) or not sk.get("key"):
@@ -603,6 +658,11 @@ class BotFSM:
             below = sk.get("target_hp_below", sk.get("target_hp_max", 100))
             above = sk.get("target_hp_above", 0)
             if not (above <= thp <= below):
+                continue
+            # диапазон СВОЕГО HP (напр. лечащий/аварийный скилл — только когда HP низкое)
+            s_below = sk.get("self_hp_below", 100)
+            s_above = sk.get("self_hp_above", 0)
+            if not (s_above <= hp <= s_below):
                 continue
             if mp < sk.get("mp_min", 0):
                 continue
