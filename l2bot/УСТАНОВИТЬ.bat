@@ -10,41 +10,45 @@ echo   (двойной клик — и всё поставится; нужен �
 echo ============================================================
 echo.
 
-rem ---------- 1. найти или установить Python ----------
-call :find_python
-if not defined PY (
-    echo [1/3] Python не найден. Пробую установить через winget...
+rem ---------- 1. найти/поставить СТАБИЛЬНЫЙ Python (3.10-3.12) ----------
+rem Вызываем Python через launcher "py" (py -3.12 ...): он сам находит Python
+rem по реестру, поэтому путь с кириллицей в имени пользователя не мешает.
+rem Берём именно 3.10-3.12 — у них есть готовые сборки всех зависимостей
+rem (у самых новых, напр. 3.13/3.14, колёс может ещё не быть).
+call :find_stable
+if not defined PYCMD (
+    echo [1/3] Стабильный Python не найден. Ставлю Python 3.12 через winget...
     where winget >nul 2>&1
     if !errorlevel! equ 0 (
         winget install -e --id Python.Python.3.12 --accept-source-agreements --accept-package-agreements
-        call :find_python
+        call :find_stable
     )
 )
-if not defined PY (
+if not defined PYCMD (
     echo.
-    echo   Не удалось поставить Python автоматически.
-    echo   Установи вручную с https://python.org  ^(галочка "Add Python to PATH"^),
-    echo   затем запусти этот файл ещё раз.
+    echo   Не удалось найти/поставить Python 3.10-3.12.
+    echo   Установи Python 3.12 с https://python.org/downloads/release/python-3129/
+    echo   ^(галочка "Add Python to PATH"^), затем запусти этот файл снова.
     start "" https://www.python.org/downloads/
     echo.
     pause
     exit /b 1
 )
-echo [1/3] Python: !PY!
+echo [1/3] Python: !PYCMD!
 echo.
 
 rem ---------- 2. зависимости Python ----------
 echo [2/3] Ставлю зависимости ^(может занять пару минут^)...
-"!PY!" -m pip install --upgrade pip
-"!PY!" -m pip install -r requirements.txt
+!PYCMD! -m pip install --upgrade pip
+!PYCMD! -m pip install -r requirements.txt
 if !errorlevel! neq 0 (
     echo.
     echo   Первая попытка не удалась — пробую в профиль пользователя ^(--user^)...
-    "!PY!" -m pip install --user -r requirements.txt
+    !PYCMD! -m pip install --user -r requirements.txt
 )
 if !errorlevel! neq 0 (
     echo.
-    echo   Не удалось поставить зависимости. ПРОКРУТИ ВЫШЕ и посмотри/пришли
+    echo   Не удалось поставить зависимости. ПРОКРУТИ ВЫШЕ и пришли
     echo   текст красной ошибки — по нему видно причину.
     pause
     exit /b 1
@@ -77,23 +81,10 @@ pause
 exit /b 0
 
 rem ==================== подпрограммы ====================
-:find_python
-set "PY="
-rem py launcher -> полный путь к python.exe
-for /f "delims=" %%i in ('py -c "import sys;print(sys.executable)" 2^>nul') do set "PY=%%i"
-if defined PY goto :eof
-rem python из PATH
-for /f "delims=" %%i in ('python -c "import sys;print(sys.executable)" 2^>nul') do set "PY=%%i"
-if defined PY goto :eof
-rem типичные пути (в т.ч. сразу после winget-установки, пока PATH не обновлён)
-for %%P in (
-  "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
-  "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-  "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-  "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
-  "%ProgramFiles%\Python313\python.exe"
-  "%ProgramFiles%\Python312\python.exe"
-  "%ProgramFiles%\Python311\python.exe"
-  "%ProgramFiles%\Python310\python.exe"
-) do if exist %%P set "PY=%%~P"
+:find_stable
+rem PYCMD = команда запуска стабильного Python (py -3.12 / -3.11 / -3.10) или пусто.
+set "PYCMD="
+py -3.12 -c "" >nul 2>&1 && ( set "PYCMD=py -3.12" & goto :eof )
+py -3.11 -c "" >nul 2>&1 && ( set "PYCMD=py -3.11" & goto :eof )
+py -3.10 -c "" >nul 2>&1 && ( set "PYCMD=py -3.10" & goto :eof )
 goto :eof

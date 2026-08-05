@@ -3,9 +3,10 @@ setlocal EnableDelayedExpansion
 rem ============================================================
 rem  Запуск l2bot от администратора двойным кликом.
 rem  Сам запрашивает права (UAC) и открывает окно бота (gui.py)
-rem  без консольного окна (через pythonw).
-rem  Python ищется несколькими способами — работает на любом ПК,
-rem  где установлен Python 3.10+ (не завязан на один путь).
+rem  без консольного окна.
+rem  Python вызывается через launcher (pyw -3.12 ...): он сам находит
+rem  Python по реестру, поэтому кириллица в имени пользователя не мешает.
+rem  Берём ту же стабильную версию (3.10-3.12), что и установщик.
 rem ============================================================
 
 rem --- проверяем права администратора; если их нет — перезапуск с UAC ---
@@ -18,37 +19,22 @@ if %errorlevel% neq 0 (
 rem --- уже админ: запускаем GUI из папки этого файла ---
 cd /d "%~dp0"
 
-rem 0) ручной оверрайд: переменная окружения L2BOT_PYTHONW = путь к pythonw.exe
-if defined L2BOT_PYTHONW if exist "%L2BOT_PYTHONW%" (
-    start "" "%L2BOT_PYTHONW%" gui.py & exit /b
+rem подобрать команду запуска (windowless) стабильного Python
+set "PYW="
+py -3.12 -c "" >nul 2>&1 && set "PYW=pyw -3.12"
+if not defined PYW ( py -3.11 -c "" >nul 2>&1 && set "PYW=pyw -3.11" )
+if not defined PYW ( py -3.10 -c "" >nul 2>&1 && set "PYW=pyw -3.10" )
+if not defined PYW ( py -c "" >nul 2>&1 && set "PYW=pyw" )
+if not defined PYW ( where pythonw >nul 2>&1 && set "PYW=pythonw" )
+
+if defined PYW (
+    start "" %PYW% gui.py
+    exit /b
 )
 
-rem 1) Python Launcher (pyw) — ставится со стандартным Python, самый надёжный
-where pyw >nul 2>&1
-if %errorlevel%==0 ( start "" pyw gui.py & exit /b )
-
-rem 2) pythonw из PATH (если Python добавлен в PATH при установке)
-where pythonw >nul 2>&1
-if %errorlevel%==0 ( start "" pythonw gui.py & exit /b )
-
-rem 3) типичные пути установки Python (для пользователя и на весь ПК)
-for %%P in (
-  "%LOCALAPPDATA%\Programs\Python\Python313\pythonw.exe"
-  "%LOCALAPPDATA%\Programs\Python\Python312\pythonw.exe"
-  "%LOCALAPPDATA%\Programs\Python\Python311\pythonw.exe"
-  "%LOCALAPPDATA%\Programs\Python\Python310\pythonw.exe"
-  "%ProgramFiles%\Python313\pythonw.exe"
-  "%ProgramFiles%\Python312\pythonw.exe"
-  "%ProgramFiles%\Python311\pythonw.exe"
-  "%ProgramFiles%\Python310\pythonw.exe"
-) do if exist %%P ( start "" %%P gui.py & exit /b )
-
-rem --- не нашли Python ---
 echo.
-echo   Python (pythonw) НЕ НАЙДЕН.
-echo   Установи Python 3.10-3.12 с https://python.org и при установке
-echo   ОБЯЗАТЕЛЬНО отметь галочку "Add Python to PATH".
-echo   Либо задай переменную окружения L2BOT_PYTHONW на свой pythonw.exe.
+echo   Python не найден. Сначала запусти УСТАНОВИТЬ.bat
+echo   (или установи Python 3.12 с https://python.org, галочка "Add Python to PATH").
 echo.
 pause
 exit /b
