@@ -561,6 +561,72 @@ def skill_ready(frame, region, key, threshold=None):
     return float(res.max()) >= threshold
 
 
+# ---------------------------------------------------------------------------
+# Метка СМЕРТИ цели: у мёртвого моба в окне цели меняется картинка (портрет/
+# иконка). Снимаем её эталон и ищем в заданной зоне — совпало = моб мёртв.
+# ---------------------------------------------------------------------------
+def dead_marker_path():
+    return os.path.join(_TEMPLATE_DIR, "target_dead.png")
+
+
+def save_dead_marker(frame, region):
+    """Снять эталон «метка смерти цели» из зоны окна цели (grayscale)."""
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    x = region["left"] - rgn["left"]; y = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, x); y0 = max(0, y)
+    x1 = min(w, x + region["width"]); y1 = min(h, y + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    os.makedirs(_TEMPLATE_DIR, exist_ok=True)
+    path = dead_marker_path()
+    ok = _imwrite(path, gray)
+    _template_cache.pop(path, None)
+    return bool(ok)
+
+
+def delete_dead_marker():
+    path = dead_marker_path()
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+    _template_cache.pop(path, None)
+
+
+def has_dead_marker():
+    return os.path.exists(dead_marker_path())
+
+
+def dead_marker_present(frame, region, threshold=None):
+    """
+    Показывает ли окно цели «метку смерти»: ищем эталон в зоне `region`.
+    True — совпало (моб мёртв). False — если эталон/зона не заданы или не совпало
+    (в отличие от skill_ready: без настройки НЕ объявляем смерть).
+    """
+    if not region:
+        return False
+    tpl = _load_template(dead_marker_path())
+    if tpl is None:
+        return False
+    threshold = config.DEAD_MARKER_THRESHOLD if threshold is None else threshold
+    rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
+    ox = region["left"] - rgn["left"]; oy = region["top"] - rgn["top"]
+    h, w = frame.shape[:2]
+    x0 = max(0, ox); y0 = max(0, oy)
+    x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
+    if x1 <= x0 or y1 <= y0:
+        return False
+    crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    th, tw = tpl.shape[:2]
+    if th > crop.shape[0] or tw > crop.shape[1]:
+        return False
+    res = cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED)
+    return float(res.max()) >= threshold
+
+
 def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None,
                             apply_exclude=True):
     """

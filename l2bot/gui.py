@@ -278,6 +278,14 @@ class App:
                       command=lambda k=key: self._calibrate_bar(k)).pack(side="left", padx=2)
         tk.Button(crow, text="Имя цели", width=8,
                   command=self.calibrate_target_name).pack(side="left", padx=2)
+        dbtn = tk.Button(crow, text="Метка смерти", width=12,
+                         command=self.calibrate_death_marker)
+        dbtn.pack(side="left", padx=2)
+        dbtn.bind("<Button-3>", lambda e: self.clear_death_marker())
+        tip(dbtn, "Основной признак смерти по КАРТИНКЕ: убей моба, оставь труп "
+                  "ВЫДЕЛЕННЫМ (в окне цели — «мёртвая» картинка) и обведи её. "
+                  "Совпадение = моб мёртв (надёжнее чтения 0 HP; HP — запасной "
+                  "способ).  ПКМ по кнопке — убрать метку.")
         self.calib_status = tk.StringVar(value="")
         tk.Label(calib, textvariable=self.calib_status, font=("Segoe UI", 8),
                  fg="#1565c0", anchor="w").pack(fill="x", padx=8)
@@ -635,6 +643,34 @@ class App:
         self._select_region(
             "Обведи рамкой ник моба   (ЛКМ — растянуть, Esc — отмена)",
             self._read_boxed_name)
+
+    def calibrate_death_marker(self):
+        self._select_region(
+            "Убей моба и, пока труп ВЫДЕЛЕН (в окне цели картинка смерти), "
+            "обведи эту картинку   Esc — отмена",
+            self._save_death_marker)
+
+    def _save_death_marker(self, left, top, w, h):
+        region = {"left": left, "top": top, "width": w, "height": h}
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+            ok = targets.save_dead_marker(frame, region)
+        except Exception as e:
+            self.calib_status.set(f"Ошибка захвата метки смерти: {e}")
+            return
+        if ok:
+            settings.set("death_region", region)
+            self.calib_status.set(f"Метка смерти задана: {w}x{h} @ ({left},{top})")
+            self._append_log(f"Метка смерти цели задана: {w}x{h} @ ({left},{top})")
+        else:
+            self.calib_status.set("Не удалось снять метку смерти (пустая область?).")
+
+    def clear_death_marker(self):
+        settings.set("death_region", None)
+        targets.delete_dead_marker()
+        self.calib_status.set("Метка смерти убрана — смерть определяется по HP.")
+        self._append_log("Метка смерти цели убрана (ПКМ по кнопке).")
 
     def set_search_region(self):
         self._select_region(
@@ -1457,6 +1493,7 @@ class App:
             ("CP", settings.get("bar_cp"), "#ffd740"),
             ("Цель HP", settings.get("bar_target"), "#ff9100"),
             ("Имя цели", settings.get("target_name_region"), "#18ffff"),
+            ("Метка смерти", settings.get("death_region"), "#e040fb"),
             ("Поиск мобов", settings.get("search_region"), "#69f0ae"),
             ("Не искать (труп)", settings.get("vision_exclude_region"), "#ff1744"),
             ("Персонаж", settings.get("character_anchor"), "#ea80fc"),

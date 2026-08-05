@@ -534,13 +534,19 @@ class BotFSM:
         ctl.press_action("attack", respect_cooldown=False)
 
     def _on_combat(self, frame, self_bars, target_present, target_hp, now):
+        # ОСНОВНОЙ признак смерти — «метка смерти» в окне цели (у мёртвого моба
+        # меняется картинка). Надёжнее чтения нуля. Проверяется, только если моба
+        # видели ЖИВЫМ в этом бою (защита от кэша/чужого окна). Если зона/эталон
+        # метки не настроены — работает ЗАПАСНОЕ определение по HP ниже.
+        if self._target_alive_seen and self._dead_marker_present(frame):
+            ctl.emit("метка смерти цели — моб мёртв")
+            self._enter_loot(now)
+            return
         # Фиксируемся на цели: одиночные сбойные кадры (цель «мигнула») не
         # выкидывают из боя. В лут уходим, только если цель пропала стабильно
         # дольше TARGET_LOST_GRACE — тогда считаем её мёртвой.
-        # СМЕРТЬ = HP цели РОВНО 0 (по числу). Труп ещё показывает «0/макс».
-        # Только если моба уже видели ЖИВЫМ в этом бою (защита от устаревшего 0 из
-        # кэша). Число читаем лишь когда цель уже почти мертва/пропала — не каждый
-        # тик зря (заливка низкая или бара нет).
+        # СМЕРТЬ (запасное) = HP цели РОВНО 0 (по числу). Труп ещё показывает
+        # «0/макс». Только если моба уже видели ЖИВЫМ (защита от устаревшего 0).
         if target_present:
             self._target_lost_since = None
             if target_hp is not None:
@@ -703,6 +709,14 @@ class BotFSM:
                          % (sk.get("label", "скилл"), sk["key"]))
                 return True     # один каст за тик; далее возобновляется автоатака
         return False
+
+    def _dead_marker_present(self, frame):
+        """Метка смерти найдена в окне цели -> моб мёртв. False, если зона/эталон
+        не настроены (тогда работает запасное определение по HP)."""
+        region = settings.get("death_region")
+        if not region:
+            return False
+        return targets.dead_marker_present(frame, region)
 
     def _target_hp_zero(self, frame):
         """
