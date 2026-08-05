@@ -39,7 +39,13 @@ echo [2/3] Ставлю зависимости ^(может занять пар�
 "!PY!" -m pip install -r requirements.txt
 if !errorlevel! neq 0 (
     echo.
-    echo   Ошибка установки зависимостей. Проверь интернет и запусти файл снова.
+    echo   Первая попытка не удалась — пробую в профиль пользователя ^(--user^)...
+    "!PY!" -m pip install --user -r requirements.txt
+)
+if !errorlevel! neq 0 (
+    echo.
+    echo   Не удалось поставить зависимости. ПРОКРУТИ ВЫШЕ и посмотри/пришли
+    echo   текст красной ошибки — по нему видно причину.
     pause
     exit /b 1
 )
