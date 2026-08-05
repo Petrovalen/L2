@@ -50,7 +50,7 @@ class BotFSM:
         self._loot_ref_sig = None       # сигнатура кадра на момент прошлого нажатия
         self._loot_still = 0            # сколько нажатий подряд без движения персонажа
         self._loot_hp_peak = None       # пик своего HP за текущий лут (детект урона по себе)
-        self._rest_hp_peak = None       # пик своего HP в отдыхе (детект «по нам бьют»)
+        self._rest_start_hp = None      # HP на входе в отдых (база детекта «по нам бьют»)
         self._low_hp_since = None       # с какого момента HP критически низкое
         self._death_notified = False    # уже уведомили о смерти (не спамить)
         self._cp_low_since = None       # с какого момента CP ниже порога (пробит)
@@ -203,7 +203,7 @@ class BotFSM:
         self._click_self()
         ctl.press_key(r["key"])                      # присесть (клавиша из панели)
         self.state = REST
-        self._rest_hp_peak = hp
+        self._rest_start_hp = hp                     # база: HP на входе в отдых
         ctl.emit("отдых: присаживаюсь (клавиша '%s', HP %s / MP %s)"
                  % (r["key"], "?" if hp is None else "%d%%" % int(hp),
                     "?" if mp is None else "%d%%" % int(mp)))
@@ -213,13 +213,16 @@ class BotFSM:
         r = config.REST
         hp = self_bars.get("hp")
         mp = self_bars.get("mp")
-        # 1) по нам БЬЮТ (своё HP падает в отдыхе) -> сразу встаём и в поиск цели.
-        #    Клавишу «встать» не жмём: в L2 удар по сидящему сам поднимает.
+        # 1) по нам БЬЮТ -> сразу встаём и в поиск цели. База — HP на ВХОДЕ в отдых
+        #    (не пик!): реген и шум чтения у верхней границы больше не выкидывают
+        #    из отдыха; выходим, только если HP просело НИЖЕ стартового на
+        #    REST_ATTACK_DROP. Клавишу «встать» не жмём — удар по сидящему сам поднимает.
         if hp is not None:
-            if self._rest_hp_peak is None or hp > self._rest_hp_peak:
-                self._rest_hp_peak = hp
-            elif hp <= self._rest_hp_peak - config.REST_ATTACK_DROP:
-                ctl.emit("отдых прерван — по мне бьют (HP %d%%)" % int(hp))
+            if self._rest_start_hp is None:
+                self._rest_start_hp = hp             # база не захватилась на входе
+            elif hp <= self._rest_start_hp - config.REST_ATTACK_DROP:
+                ctl.emit("отдых прерван — по мне бьют (HP %d%% < старт %d%%)"
+                         % (int(hp), int(self._rest_start_hp)))
                 self._to_search(now)
                 return
         # 2) отрегенились (HP>=exit_hp И MP>=exit_mp) -> встаём и в поиск.
