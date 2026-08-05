@@ -722,9 +722,12 @@ class App:
             return
         name = self.mob_listbox.get(sel[0])
         mob_list.remove(name)
-        targets.delete_template(name)     # убрать и снимок ника
+        # шаблон ника — ОБЩИЙ; удаляем его, только если имя не осталось в списке
+        # какого-то другого профиля персонажа.
+        if not mob_list.name_used_anywhere(name):
+            targets.delete_template(name)
         self._refresh_mobs()
-        self.mob_status.set(f"Удалён: {name}")
+        self.mob_status.set(f"Удалён (из этого профиля): {name}")
 
     # --- настройки визуального поиска (применяются к боту сразу) ---
     def _on_vision_toggle(self):
@@ -902,6 +905,9 @@ class App:
         if hasattr(self, "_buff_vars"):
             self._buff_vars = [self._buff_to_vars(b) for b in config.BUFFS]
             self._render_buff_rows()
+        # белый список мобов — свой у каждого профиля персонажа
+        if hasattr(self, "mob_listbox"):
+            self._refresh_mobs()
         # режим цифр (профиль ПК)
         for key, var in getattr(self, "digit_enabled", {}).items():
             d = settings.get("bar_%s_digits" % key) or {}

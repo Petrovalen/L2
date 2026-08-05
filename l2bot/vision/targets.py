@@ -132,7 +132,7 @@ def name_in_list(text, names):
     return _match_name(text, [(n, n.lower()) for n in names]) is not None
 
 
-def scan_nameplates(frame, region, names=None):
+def scan_nameplates(frame, region, names=None, apply_exclude=True):
     """
     Найти ВСЕ таблички имён в области `region`, распознать и (если задан
     белый список names) отметить совпавшие. Для детекции и отладочной отрисовки.
@@ -173,7 +173,7 @@ def scan_nameplates(frame, region, names=None):
         d2 = (cx - ax) ** 2 + (cy - ay) ** 2
         cand.append((d2, bx, by, bw, bh, left, top, cx, cy))
     cand.sort(key=lambda c: c[0])
-    ex = _exclude_region()                            # зона «не искать» у персонажа
+    ex = _exclude_region() if apply_exclude else None   # зона «не искать» у персонажа
 
     out = []
     for d2, bx, by, bw, bh, left, top, cx, cy in cand[:config.VISION_MAX_OCR]:
@@ -196,15 +196,17 @@ def scan_nameplates(frame, region, names=None):
     return out   # уже по возрастанию расстояния до персонажа
 
 
-def find_named_mobs(frame, names, region):
+def find_named_mobs(frame, names, region, apply_exclude=True):
     """
     Ники мобов из белого списка на экране, ближайшие к ТОЧКЕ ПЕРСОНАЖА — первыми:
         [{"x": screen_x, "y": screen_y, "name": имя}, ...]
+    apply_exclude=False — не отсекать стоп-зону у персонажа (для проверки
+    видимости УЖЕ выбранной цели, которая могла подбежать вплотную).
     """
     if not names or not region:
         return []
     return [{"x": d["x"], "y": d["y"], "name": d["name"]}
-            for d in scan_nameplates(frame, region, names) if d["name"]]
+            for d in scan_nameplates(frame, region, names, apply_exclude) if d["name"]]
 
 
 def boxes_in_crop(crop, off_left, off_top):
@@ -559,7 +561,8 @@ def skill_ready(frame, region, key, threshold=None):
     return float(res.max()) >= threshold
 
 
-def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
+def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None,
+                            apply_exclude=True):
     """
     Общий матчинг шаблонов ников на УЖЕ вырезанной области зоны поиска `crop`
     (BGR). `region` — экранные координаты зоны (для пересчёта в экран),
@@ -609,7 +612,7 @@ def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
                          "x": cx, "y": cy, "name": name,
                          "score": float(res[my, mx]),
                          "_d": (cx - ax) ** 2 + (cy - ay) ** 2})
-    ex = _exclude_region()                            # зона «не искать» у персонажа
+    ex = _exclude_region() if apply_exclude else None   # зона «не искать» у персонажа
     if ex:
         hits = [h for h in hits if not _in_region(h["x"], h["y"], ex)]
     hits = _dedupe(hits)
@@ -620,11 +623,13 @@ def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None):
     return hits
 
 
-def find_mobs_by_template(frame, names, region, threshold=None):
+def find_mobs_by_template(frame, names, region, threshold=None, apply_exclude=True):
     """
     Найти мобов из белого списка по шаблонам их ников внутри зоны поиска.
     Возврат: как у match_templates_in_crop; ближайший — первым. Пусто, если ни
     один шаблон не совпал (тогда вызывающий откатится на OCR-скан).
+    apply_exclude=False — не отсекать стоп-зону у персонажа (для проверки
+    видимости УЖЕ выбранной цели, которая могла подбежать вплотную).
     """
     if not names or not region:
         return []
@@ -636,4 +641,5 @@ def find_mobs_by_template(frame, names, region, threshold=None):
     if x1 <= x0 or y1 <= y0:
         return []
     return match_templates_in_crop(
-        frame[y0:y1, x0:x1], region, names, _anchor_screen(frame), threshold)
+        frame[y0:y1, x0:x1], region, names, _anchor_screen(frame), threshold,
+        apply_exclude=apply_exclude)

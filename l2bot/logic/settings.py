@@ -45,7 +45,7 @@ _MACHINE_KEYS = {
     "vision_exclude_region",
 }
 # Ключи, относящиеся к ПРОФИЛЮ ПЕРСОНАЖА (зависят от класса).
-_CHARACTER_KEYS = {"keys", "skills", "heal", "mp_potion", "buffs", "rest"}
+_CHARACTER_KEYS = {"keys", "skills", "heal", "mp_potion", "buffs", "rest", "mobs"}
 
 _DEFAULT = "default"
 

@@ -198,11 +198,14 @@ class BotFSM:
             need = True
         if not need:
             return False
-        ctl.press_key(r["key"])                      # присесть
+        # Сначала выделяем СЕБЯ (клик по своей полоске HP): снимает враждебную
+        # цель, иначе игра часто не даёт присесть. Затем жмём клавишу «присесть».
+        self._click_self()
+        ctl.press_key(r["key"])                      # присесть (клавиша из панели)
         self.state = REST
         self._rest_hp_peak = hp
-        ctl.emit("отдых: сажусь регениться (HP %s / MP %s)"
-                 % ("?" if hp is None else "%d%%" % int(hp),
+        ctl.emit("отдых: присаживаюсь (клавиша '%s', HP %s / MP %s)"
+                 % (r["key"], "?" if hp is None else "%d%%" % int(hp),
                     "?" if mp is None else "%d%%" % int(mp)))
         return True
 
@@ -223,8 +226,8 @@ class BotFSM:
         hp_ok = (not r.get("exit_hp")) or (hp is not None and hp >= r["exit_hp"])
         mp_ok = (not r.get("exit_mp")) or (mp is not None and mp >= r["exit_mp"])
         if hp_ok and mp_ok:
-            ctl.press_key(r["key"])                  # встать
-            ctl.emit("отдых окончен — HP/MP восстановлены")
+            ctl.press_key(r["key"])                  # встать (клавиша из панели)
+            ctl.emit("отдых окончен — встаю (клавиша '%s')" % r["key"])
             self._to_search(now)
 
     def _on_search(self, frame, self_bars, target_present, target_hp, now):
@@ -408,10 +411,25 @@ class BotFSM:
             label = b.get("label", "")
             if targets.buff_present(frame, region, label):
                 continue
+            # Селф-бафф применяется на СЕБЯ: сначала выделяем себя кликом по своей
+            # полоске HP (иначе бафф уйдёт на выделенного моба / не прокастуется),
+            # затем жмём скилл.
+            self._click_self()
             if ctl.press_skill("buff_%s" % label, b["key"], b.get("cooldown", 3.0)):
-                ctl.emit("бафф '%s' спал — накладываю" % (label or "бафф"))
+                ctl.emit("бафф '%s' спал — выделяю себя и накладываю" % (label or "бафф"))
                 return True
         return False
+
+    def _click_self(self):
+        """Выделить СЕБЯ — клик по своей полоске HP (bar_hp). Для селф-баффов."""
+        spec = settings.get("bar_hp")
+        if not spec:
+            return False
+        cx = spec["left"] + spec["width"] // 2
+        cy = spec["top"] + spec["height"] // 2
+        ctl.click(cx, cy)
+        ctl.sleep(config.SELF_TARGET_SETTLE)   # дать себе выделиться перед кастом
+        return True
 
     def _keep_target_visible(self, frame, now):
         """
@@ -428,8 +446,10 @@ class BotFSM:
         names = mob_list.load()
         if not region or not names:
             return
-        visible = (targets.find_mobs_by_template(frame, names, region)
-                   or targets.find_named_mobs(frame, names, region))
+        # apply_exclude=False: цель в бою могла подбежать вплотную и войти в
+        # стоп-зону у персонажа — она всё равно НА экране, это не «вне кадра».
+        visible = (targets.find_mobs_by_template(frame, names, region, apply_exclude=False)
+                   or targets.find_named_mobs(frame, names, region, apply_exclude=False))
         if visible:
             self._view_lost_since = None
             self._target_seen = True         # цель хоть раз попала в кадр
