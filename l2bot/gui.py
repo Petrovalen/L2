@@ -713,6 +713,12 @@ class App:
         self.mob_status.set("Стоп-зона у персонажа убрана")
         self._append_log("Стоп-зона визуального поиска убрана (ПКМ по кнопке).")
 
+    def _toggle_buff_debug(self):
+        config.BUFF_DEBUG = bool(self._buff_debug_var.get())
+        state = "ВКЛ" if config.BUFF_DEBUG else "выкл"
+        self._append_log("Лог совпадения баффов: %s (пиши в ленту score каждого баффа)."
+                         % state)
+
     def set_buff_region(self):
         self._select_region(
             "Обведи ЗОНУ панели баффов (где иконки баффов персонажа)   Esc — отмена",
@@ -1055,8 +1061,14 @@ class App:
         # --- самобаффы (поддерживаются ВНЕ боя по иконке в панели баффов) ---
         bf = ttk.LabelFrame(win, text="Баффы (держать на персонаже, вне боя)")
         bf.pack(fill="x", padx=10, pady=6)
-        tk.Button(bf, text="Зона панели баффов",
-                  command=self.set_buff_region).pack(anchor="w", padx=8, pady=(4, 0))
+        brow = tk.Frame(bf)
+        brow.pack(fill="x", padx=8, pady=(4, 0))
+        tk.Button(brow, text="Зона панели баффов",
+                  command=self.set_buff_region).pack(side="left")
+        self._buff_debug_var = tk.BooleanVar(value=bool(getattr(config, "BUFF_DEBUG", False)))
+        tk.Checkbutton(brow, text="лог совпадения (диагностика)",
+                       variable=self._buff_debug_var,
+                       command=self._toggle_buff_debug).pack(side="left", padx=10)
         bhint = ("Имя — подпись/файл иконки. «Иконка» — обведи иконку баффа в панели.\n"
                  "Если иконки нет в зоне — бафф считается спавшим и накладывается.")
         tk.Label(bf, text=bhint, font=("Segoe UI", 8), fg="#1565c0",

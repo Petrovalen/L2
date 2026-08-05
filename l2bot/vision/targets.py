@@ -450,15 +450,17 @@ def delete_buff_template(label):
     _template_cache.pop(path, None)
 
 
-def buff_present(frame, region, label, threshold=None):
+def buff_score(frame, region, label, threshold=None):
     """
-    Висит ли бафф `label`: ищем его иконку (шаблон) в зоне панели баффов.
-    True — иконка найдена (бафф активен). Если шаблона нет или зона кривая —
-    возвращаем True (проверить нечем; НЕ спамим кастом).
+    Диагностика buff_present: вернуть (present, info) — где info человекочитаемо
+    объясняет решение (score и порог, либо причину). present как у buff_present:
+    True — иконка найдена/проверить нечем (НЕ спамим кастом), False — бафф спал.
     """
+    if not region:
+        return True, "нет зоны баффов"
     tpl = _load_template(buff_template_path(label))
-    if tpl is None or not region:
-        return True
+    if tpl is None:
+        return True, "нет шаблона иконки"
     threshold = config.BUFF_MATCH_THRESHOLD if threshold is None else threshold
     rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
     ox = region["left"] - rgn["left"]; oy = region["top"] - rgn["top"]
@@ -466,13 +468,26 @@ def buff_present(frame, region, label, threshold=None):
     x0 = max(0, ox); y0 = max(0, oy)
     x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
     if x1 <= x0 or y1 <= y0:
-        return True
+        return True, "зона вне кадра"
     crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     th, tw = tpl.shape[:2]
     if th > crop.shape[0] or tw > crop.shape[1]:
-        return True
+        return True, ("шаблон больше зоны (%dx%d > %dx%d) — пересними иконку"
+                      % (tw, th, crop.shape[1], crop.shape[0]))
     res = cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED)
-    return float(res.max()) >= threshold
+    score = float(res.max())
+    present = score >= threshold
+    return present, ("совпадение %.2f / порог %.2f -> %s"
+                     % (score, threshold, "ЕСТЬ" if present else "СПАЛ"))
+
+
+def buff_present(frame, region, label, threshold=None):
+    """
+    Висит ли бафф `label`: ищем его иконку (шаблон) в зоне панели баффов.
+    True — иконка найдена (бафф активен). Если шаблона нет или зона кривая —
+    возвращаем True (проверить нечем; НЕ спамим кастом).
+    """
+    return buff_score(frame, region, label, threshold)[0]
 
 
 def locate_buff(frame, region, label):

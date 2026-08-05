@@ -401,18 +401,26 @@ class BotFSM:
         первый недостающий (иконки нет в зоне баффов) — накладываем и возвращаем
         True (вызывающий поставит паузу на прокаст). Один бафф за проход.
         """
-        region = settings.get("buff_region")
         buffs = settings.get("buffs") or config.BUFFS
-        if not region or not buffs:
+        if not buffs:
             return False
         if now - self._last_buff_check < config.BUFF_CHECK_INTERVAL:
             return False
         self._last_buff_check = now
+        region = settings.get("buff_region")
+        debug = getattr(config, "BUFF_DEBUG", False)
+        if not region:
+            if debug:
+                ctl.emit("баффы: зона баффов НЕ задана — проверять нечем")
+            return False
         for b in buffs:
             if not b.get("enabled") or not b.get("key"):
                 continue
             label = b.get("label", "")
-            if targets.buff_present(frame, region, label):
+            present, info = targets.buff_score(frame, region, label)
+            if debug:
+                ctl.emit("бафф '%s': %s" % (label or "бафф", info))
+            if present:
                 continue
             # Селф-бафф применяется на СЕБЯ: сначала выделяем себя кликом по своей
             # полоске HP (иначе бафф уйдёт на выделенного моба / не прокастуется),
