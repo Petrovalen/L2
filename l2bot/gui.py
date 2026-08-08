@@ -58,7 +58,7 @@ KEY_ACTIONS = [
 DEFAULT_SKILL = {"key": "", "label": "Скилл", "cooldown": 4.0,
                  "target_hp_above": 0, "target_hp_below": 100,
                  "self_hp_above": 0, "self_hp_below": 100, "mp_min": 0,
-                 "once": False, "enabled": True}
+                 "once": False, "target_state": "alive", "enabled": True}
 
 WARMUP_SEC = 3          # пауза перед стартом — успеть переключиться в игру
 MAX_LOG_LINES = 500     # ограничение размера ленты
@@ -286,6 +286,21 @@ class App:
                   "ВЫДЕЛЕННЫМ (в окне цели — «мёртвая» картинка) и обведи её. "
                   "Совпадение = моб мёртв (надёжнее чтения 0 HP; HP — запасной "
                   "способ).  ПКМ по кнопке — убрать метку.")
+        self._dead_debug_var = tk.BooleanVar(
+            value=bool(getattr(config, "DEAD_MARKER_DEBUG", False)))
+        dchk = tk.Checkbutton(crow, text="лог метки", variable=self._dead_debug_var,
+                              command=self._toggle_dead_debug)
+        dchk.pack(side="left", padx=2)
+        tip(dchk, "Диагностика: писать в ленту score метки смерти в бою "
+                  "(совпадение/порог) — чтобы подобрать порог DEAD_MARKER_THRESHOLD.")
+        self._marker_only_var = tk.BooleanVar(
+            value=bool(getattr(config, "DEATH_BY_MARKER_ONLY", False)))
+        mochk = tk.Checkbutton(crow, text="только метка", variable=self._marker_only_var,
+                               command=self._toggle_marker_only)
+        mochk.pack(side="left", padx=2)
+        tip(mochk, "Смерть определять ТОЛЬКО по метке. Запасные признаки (HP=0 и "
+                   "«окно цели пропало») выключены: окно без цели = потеря, в лут "
+                   "не уходим. Если метка не поймает смерть — лут пропустим.")
         self.calib_status = tk.StringVar(value="")
         tk.Label(calib, textvariable=self.calib_status, font=("Segoe UI", 8),
                  fg="#1565c0", anchor="w").pack(fill="x", padx=8)
@@ -719,6 +734,18 @@ class App:
         self._append_log("Лог совпадения баффов: %s (пиши в ленту score каждого баффа)."
                          % state)
 
+    def _toggle_dead_debug(self):
+        config.DEAD_MARKER_DEBUG = bool(self._dead_debug_var.get())
+        state = "ВКЛ" if config.DEAD_MARKER_DEBUG else "выкл"
+        self._append_log("Лог метки смерти: %s (пиши в ленту score метки в бою)."
+                         % state)
+
+    def _toggle_marker_only(self):
+        config.DEATH_BY_MARKER_ONLY = bool(self._marker_only_var.get())
+        state = "ВКЛ" if config.DEATH_BY_MARKER_ONLY else "выкл"
+        self._append_log("Смерть ТОЛЬКО по метке: %s (запасные HP=0 и «окно пропало» %s)."
+                         % (state, "выключены" if config.DEATH_BY_MARKER_ONLY else "включены"))
+
     def set_buff_region(self):
         self._select_region(
             "Обведи ЗОНУ панели баффов (где иконки баффов персонажа)   Esc — отмена",
@@ -1034,7 +1061,9 @@ class App:
                 "HP цели от…до — каст только если HP цели в этом диапазоне % (0…100 = всегда).\n"
                 "своё HP от…до — каст только если СВОЁ HP в этом диапазоне % (0…100 = всегда;\n"
                 "напр. лечащий скилл: от 0 до 50).  MP ≥ — своя MP не ниже % (0 = без условия).\n"
-                "КД — не чаще раза в с.  «раз» — один раз за цель (для стартовых скиллов).")
+                "КД — не чаще раза в с.  «раз» — один раз за цель (для стартовых скиллов).\n"
+                "когда — «жив»: каст в бою по HP цели; «мёртв»: каст ПО ТРУПУ в луте "
+                "(Sweep/сбор спойла, добивание) — диапазоны HP тогда не важны.")
         tk.Label(sf, text=hint, font=("Segoe UI", 8), fg="#1565c0",
                  justify="left", anchor="w").pack(fill="x", padx=8, pady=(4, 2))
 
@@ -1042,7 +1071,7 @@ class App:
         head.pack(fill="x", padx=8)
         for text, w in (("вкл", 3), ("Клав", 6), ("HP цели от", 9), ("HP цели до", 9),
                         ("своё HP от", 9), ("своё HP до", 9), ("MP ≥ %", 7),
-                        ("КД", 5), ("раз", 4), ("гот", 5), ("", 8)):
+                        ("КД", 5), ("раз", 4), ("когда", 6), ("гот", 5), ("", 8)):
             tk.Label(head, text=text, width=w, anchor="w",
                      font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
 
@@ -1148,6 +1177,8 @@ class App:
             "mp_min": tk.IntVar(value=int(sk.get("mp_min", 0))),
             "cooldown": tk.DoubleVar(value=float(sk.get("cooldown", 4.0))),
             "once": tk.BooleanVar(value=bool(sk.get("once", False))),
+            "state": tk.StringVar(                    # «когда»: жив / мёртв (по трупу)
+                value=("мёртв" if sk.get("target_state", "alive") == "dead" else "жив")),
             "ready_region": sk.get("ready_region"),   # dict|None (проверка готовности)
         }
 
@@ -1274,6 +1305,8 @@ class App:
             tk.Spinbox(row, from_=0.0, to=600.0, increment=0.5,
                        textvariable=v["cooldown"], width=5).pack(side="left", padx=1)
             tk.Checkbutton(row, variable=v["once"], width=2).pack(side="left", padx=1)
+            ttk.Combobox(row, textvariable=v["state"], values=("жив", "мёртв"),
+                         width=5, state="readonly").pack(side="left", padx=1)
             ready_set = bool(v.get("ready_region"))
             tk.Button(row, text=("гот✓" if ready_set else "гот"), width=4,
                       fg=("#2e7d32" if ready_set else "black"),
@@ -1319,6 +1352,7 @@ class App:
                 "self_hp_below": s_below,
                 "mp_min": mp,
                 "once": bool(v["once"].get()),
+                "target_state": ("dead" if v["state"].get() == "мёртв" else "alive"),
                 "enabled": bool(v["enabled"].get()),
                 "ready_region": v.get("ready_region"),
             })

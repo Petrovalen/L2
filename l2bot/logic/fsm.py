@@ -50,6 +50,7 @@ class BotFSM:
         self._loot_ref_sig = None       # сигнатура кадра на момент прошлого нажатия
         self._loot_still = 0            # сколько нажатий подряд без движения персонажа
         self._loot_hp_peak = None       # пик своего HP за текущий лут (детект урона по себе)
+        self._dead_cast_idx = set()     # скиллы «по трупу», уже применённые в этом луте
         self._rest_start_hp = None      # HP на входе в отдых (база детекта «по нам бьют»)
         self._low_hp_since = None       # с какого момента HP критически низкое
         self._death_notified = False    # уже уведомили о смерти (не спамить)
@@ -74,6 +75,7 @@ class BotFSM:
         self._view_lost_since = None    # с какого момента цель не видно в кадре
         self._last_view_rotate = 0.0    # последний доворот камеры к цели
         self._target_seen = False       # цель хоть раз попадала в кадр за этот бой
+        self._last_dead_dbg = 0.0        # троттл лога метки смерти (диагностика)
 
     # ---- вспомогательные проверки ---------------------------------------
     def _survival(self, self_bars):
@@ -546,50 +548,69 @@ class BotFSM:
         # меняется картинка). Надёжнее чтения нуля. Проверяется, только если моба
         # видели ЖИВЫМ в этом бою (защита от кэша/чужого окна). Если зона/эталон
         # метки не настроены — работает ЗАПАСНОЕ определение по HP ниже.
-        if self._target_alive_seen and self._dead_marker_present(frame):
-            ctl.emit("метка смерти цели — моб мёртв")
-            self._enter_loot(now)
+        if self._target_alive_seen and self._dead_marker_present(frame, now):
+            self._enter_loot(now, "метка смерти")
             return
         # Фиксируемся на цели: одиночные сбойные кадры (цель «мигнула») не
         # выкидывают из боя. В лут уходим, только если цель пропала стабильно
         # дольше TARGET_LOST_GRACE — тогда считаем её мёртвой.
         # СМЕРТЬ (запасное) = HP цели РОВНО 0 (по числу). Труп ещё показывает
         # «0/макс». Только если моба уже видели ЖИВЫМ (защита от устаревшего 0).
+        # Режим «ТОЛЬКО МЕТКА»: смерть определяем ИСКЛЮЧИТЕЛЬНО меткой (выше).
+        # Запасные признаки (HP=0, «окно пропало = смерть») отключены — окно без
+        # цели считаем ПОТЕРЕЙ цели, а не смертью (в лут не уходим).
+        marker_only = getattr(config, "DEATH_BY_MARKER_ONLY", False)
         if target_present:
             self._target_lost_since = None
             if target_hp is not None:
                 self._last_target_hp = target_hp      # запоминаем HP цели
                 if target_hp > config.TARGET_DEAD_HP:
                     self._target_alive_seen = True    # видели этого моба ЖИВЫМ
-            near_death = (target_hp is None or target_hp <= config.TARGET_DEAD_HP)
-            if (self._target_alive_seen and near_death
-                    and self._target_hp_zero(frame)):
-                self._enter_loot(now)                 # HP цели = 0 -> труп
-                return
+            if not marker_only:
+                near_death = (target_hp is None or target_hp <= config.TARGET_DEAD_HP)
+                if (self._target_alive_seen and near_death
+                        and self._target_hp_zero(frame)):
+                    self._enter_loot(now, "HP цели = 0")  # труп ещё показывает 0/макс
+                    return
             self._keep_target_visible(frame, now)   # доводим камеру, если моб вне кадра
+        elif marker_only:
+            # ТОЛЬКО МЕТКА. В L2 выделенная цель сама не снимается — селект держится
+            # до смерти моба или НАШЕЙ смены цели. Поэтому пропажу/пустоту бара НЕ
+            # считаем потерей, ПОКА моба видели живым: пустой бар на добивании
+            # (HP < ~5%) выглядит так же, как «цели нет». Продолжаем бить — смерть
+            # решит МЕТКА (выше), а реально недостижимую цель отсечёт сторож «нет
+            # урона» / таймаут боя ниже (работают и без читаемого бара).
+            if self._target_alive_seen:
+                self._target_lost_since = None      # не потеря — держим бой, добиваем
+            else:
+                # моба вообще НЕ видели живым (промах селекта / чужое окно мигнуло) —
+                # короткий грейс и в поиск.
+                if self._target_lost_since is None:
+                    self._target_lost_since = now
+                elif now - self._target_lost_since > config.TARGET_LOST_GRACE:
+                    self._give_up_target(frame, now, "цель потеряна")
+                    return
         else:
-            # Бар цели пропал. СНАЧАЛА пробуем подтвердить смерть числом — труп
-            # ещё показывает «0/макс» (строгий 0 HP, если успеем прочитать).
+            # ОБЫЧНЫЙ режим (запасные признаки смерти по бару, как раньше). Бар
+            # пропал — СНАЧАЛА пробуем подтвердить смерть числом (труп ещё показывает
+            # «0/макс», если успеем прочитать).
             if self._target_alive_seen and self._target_hp_zero(frame):
-                self._enter_loot(now)
+                self._enter_loot(now, "HP цели = 0 (окно закрывается)")
                 return
-            # Ноль прочитать не успели (труп/окно исчезают мгновенно, цифры не
-            # всегда читаются). Ждём грейс от миганий детекции, затем: если моба
-            # ВИДЕЛИ ЖИВЫМ, а его окно пропало — это смерть (в L2 окно цели держится
-            # при потере линии видимости и сбрасывается только смертью/снятием цели;
-            # цель сами не снимаем, недостижимую отсекает сторож «нет урона» выше)
-            # -> идём в ЛУТ. Иначе — цель действительно потеряна.
+            # Ноль не успели прочитать. Грейс от миганий детекции, затем: видели
+            # живым, а окно пропало -> смерть -> ЛУТ; иначе цель потеряна.
             if self._target_lost_since is None:
                 self._target_lost_since = now
             elif now - self._target_lost_since > config.TARGET_LOST_GRACE:
                 if self._target_alive_seen:
-                    self._enter_loot(now)             # моб убит -> собираем лут
+                    self._enter_loot(now, "окно цели пропало, моб был жив")
                 else:
                     self._give_up_target(frame, now, "цель потеряна")
                 return
-        # сторож прогресса урона: HP цели должно падать. Если за NO_DAMAGE_TIMEOUT
-        # оно не упало на MIN_DAMAGE_PERCENT — бьём «в никуда» (препятствие / вне
-        # линии видимости, «Cannot see target») -> бросаем цель и репозиционируемся.
+        # сторож прогресса урона: HP цели должно падать. Судим ТОЛЬКО пока бар
+        # читается — на добивании (HP < ~5%) бар пуст, и мы слепы к урону; ложно
+        # решать «нет урона» и бросать ЖИВОГО моба нельзя. В слепой фазе цель
+        # добиваем автоатакой, а страхует жёсткий таймаут боя (ATTACK_TIMEOUT) ниже.
         if target_present and target_hp is not None:
             if self._target_hp_best is None:
                 self._target_hp_best = target_hp
@@ -608,7 +629,10 @@ class BotFSM:
         # способности: кастуем те, чьи условия (HP цели / своя MP) выполнены.
         # HP цели — процент по цифрам «тек/макс» (напр. 1500/3000 -> 50%).
         # Скилл прерывает автоатаку -> сразу после него возобновляем её.
-        if self._use_skills(frame, self_bars, target_hp):
+        # HP цели для скиллов: когда бар не читается (добивание) — НЕИЗВЕСТНО (None),
+        # а не 0. Иначе скилл «на 0 HP» кастуется по живому и рвёт автоатаку.
+        skill_thp = target_hp if target_present else None
+        if self._use_skills(frame, self_bars, skill_thp):
             ctl.press_action("attack", respect_cooldown=False)
         else:
             # страховка: если автоатака оборвалась — переначинаем изредка
@@ -682,6 +706,10 @@ class BotFSM:
           задана зона иконки — скилл должен быть ГОТОВ по иконке).
         Один каст за тик — между кастами идёт автоатака. Вернуть True, если
         способность применена.
+
+        target_hp=None -> HP цели НЕИЗВЕСТНО (бар не читается, напр. добивание).
+        Тогда thp=100 -> скиллы с нижним диапазоном HP (в т.ч. «на 0 HP») НЕ
+        кастуются вслепую и не рвут автоатаку по ещё живому мобу.
         """
         mp = self_bars.get("mp")
         mp = 100.0 if mp is None else mp
@@ -690,6 +718,10 @@ class BotFSM:
         thp = 100.0 if target_hp is None else target_hp
         for i, sk in enumerate(config.SKILLS):
             if not sk.get("enabled", True) or not sk.get("key"):
+                continue
+            # «когда»: боевая ротация — только скиллы состояния «жив». Скиллы
+            # «мёртв» (по трупу, напр. Sweep) кастуются в луте (_use_dead_skills).
+            if sk.get("target_state", "alive") == "dead":
                 continue
             # диапазон HP цели (target_hp_max — старое имя верхней границы)
             below = sk.get("target_hp_below", sk.get("target_hp_max", 100))
@@ -718,13 +750,44 @@ class BotFSM:
                 return True     # один каст за тик; далее возобновляется автоатака
         return False
 
-    def _dead_marker_present(self, frame):
+    def _use_dead_skills(self, self_bars):
+        """
+        Скиллы с условием «когда» = МЁРТВ (target_state='dead') — по трупу цели
+        (напр. Sweep/сбор спойла, добивающий скилл). Кастуются в ЛУТЕ, по одному
+        разу за труп, по порядку, с учётом своей MP и кулдауна. HP цели не
+        проверяем — моб уже мёртв. Диапазоны HP у таких скиллов игнорируются.
+        """
+        mp = self_bars.get("mp")
+        mp = 100.0 if mp is None else mp
+        for i, sk in enumerate(config.SKILLS):
+            if sk.get("target_state", "alive") != "dead":
+                continue
+            if not sk.get("enabled", True) or not sk.get("key"):
+                continue
+            if i in self._dead_cast_idx:          # этот скилл уже применён к трупу
+                continue
+            if mp < sk.get("mp_min", 0):
+                continue
+            cd_key = "skill_%d" % i
+            if ctl.press_skill(cd_key, sk["key"], sk.get("cooldown", 4.0)):
+                self._dead_cast_idx.add(i)
+                ctl.emit("скилл '%s' по трупу (клавиша '%s')"
+                         % (sk.get("label", "скилл"), sk["key"]))
+
+    def _dead_marker_present(self, frame, now):
         """Метка смерти найдена в окне цели -> моб мёртв. False, если зона/эталон
-        не настроены (тогда работает запасное определение по HP)."""
+        не настроены (тогда работает запасное определение по HP). При
+        DEAD_MARKER_DEBUG пишем score в ленту (троттлинг) — для подбора порога."""
         region = settings.get("death_region")
-        if not region:
-            return False
-        return targets.dead_marker_present(frame, region)
+        if not getattr(config, "DEAD_MARKER_DEBUG", False):
+            if not region:
+                return False
+            return targets.dead_marker_present(frame, region)
+        present, info = targets.dead_marker_score(frame, region)
+        if now - self._last_dead_dbg >= config.DEAD_MARKER_DEBUG_INTERVAL:
+            self._last_dead_dbg = now
+            ctl.emit("метка смерти: %s" % info)
+        return present
 
     def _target_hp_zero(self, frame):
         """
@@ -748,8 +811,11 @@ class BotFSM:
         d = settings.get("bar_target_digits")
         return bool(d and d.get("enabled"))
 
-    def _enter_loot(self, now):
-        """Перейти к сбору лута: труп ещё виден — гасим вижн-клик по его точке."""
+    def _enter_loot(self, now, reason=""):
+        """Перейти к сбору лута: труп ещё виден — гасим вижн-клик по его точке.
+        reason — по какому признаку признали смерть (для лога/диагностики)."""
+        if reason:
+            ctl.emit("моб мёртв (%s) -> лут" % reason)
         self._no_dmg_streak = 0          # моб убит -> не застряли (сброс эскалации)
         self._prefer_vision_until = 0.0
         # В режиме АССИСТА лут НЕ собираем — сразу назад в поиск (берём след. ассист).
@@ -768,6 +834,7 @@ class BotFSM:
         self._loot_ref_sig = None
         self._loot_still = 0
         self._loot_hp_peak = None        # пик своего HP за лут (ловим урон по себе)
+        self._dead_cast_idx = set()      # какие скиллы «по трупу» уже применены
 
     def _on_loot(self, frame, self_bars, now):
         # По нам бьёт моб? В луте свой HP не должен падать. Если он просел ниже
@@ -781,6 +848,8 @@ class BotFSM:
                 ctl.emit("в луте бьют (HP %d%%) — возвращаюсь в бой" % int(hp))
                 self._to_search(now)     # переберём цель и вступим в бой с атакующим
                 return
+        # Скиллы «по трупу» (Sweep/сбор спойла) — ДО подбора, чтобы создать дроп.
+        self._use_dead_skills(self_bars)
         # Жмём «подобрать» ПО ОДНОМУ разу за LOOT_PRESS_INTERVAL (а не серией):
         # между нажатиями персонаж успевает добежать до предмета и поднять его.
         if now - self._last_loot_press >= config.LOOT_PRESS_INTERVAL:

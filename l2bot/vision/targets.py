@@ -615,17 +615,18 @@ def has_dead_marker():
     return os.path.exists(dead_marker_path())
 
 
-def dead_marker_present(frame, region, threshold=None):
+def dead_marker_score(frame, region, threshold=None):
     """
-    Показывает ли окно цели «метку смерти»: ищем эталон в зоне `region`.
-    True — совпало (моб мёртв). False — если эталон/зона не заданы или не совпало
-    (в отличие от skill_ready: без настройки НЕ объявляем смерть).
+    Диагностика dead_marker_present: вернуть (present, info) — где info
+    человекочитаемо объясняет решение (score и порог, либо причину). present как
+    у dead_marker_present: True — метка совпала (моб мёртв). В отличие от баффов,
+    при отсутствии зоны/эталона возвращаем False (смерть НЕ объявляем).
     """
     if not region:
-        return False
+        return False, "нет зоны метки смерти"
     tpl = _load_template(dead_marker_path())
     if tpl is None:
-        return False
+        return False, "нет эталона метки смерти"
     threshold = config.DEAD_MARKER_THRESHOLD if threshold is None else threshold
     rgn = config.CAPTURE_REGION or {"left": 0, "top": 0}
     ox = region["left"] - rgn["left"]; oy = region["top"] - rgn["top"]
@@ -633,13 +634,26 @@ def dead_marker_present(frame, region, threshold=None):
     x0 = max(0, ox); y0 = max(0, oy)
     x1 = min(w, ox + region["width"]); y1 = min(h, oy + region["height"])
     if x1 <= x0 or y1 <= y0:
-        return False
+        return False, "зона вне кадра"
     crop = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     th, tw = tpl.shape[:2]
     if th > crop.shape[0] or tw > crop.shape[1]:
-        return False
+        return False, ("эталон больше зоны (%dx%d > %dx%d) — пересними метку"
+                       % (tw, th, crop.shape[1], crop.shape[0]))
     res = cv2.matchTemplate(crop, tpl, cv2.TM_CCOEFF_NORMED)
-    return float(res.max()) >= threshold
+    score = float(res.max())
+    present = score >= threshold
+    return present, ("совпадение %.2f / порог %.2f -> %s"
+                     % (score, threshold, "МЁРТВ" if present else "жив"))
+
+
+def dead_marker_present(frame, region, threshold=None):
+    """
+    Показывает ли окно цели «метку смерти»: ищем эталон в зоне `region`.
+    True — совпало (моб мёртв). False — если эталон/зона не заданы или не совпало
+    (в отличие от skill_ready: без настройки НЕ объявляем смерть).
+    """
+    return dead_marker_score(frame, region, threshold)[0]
 
 
 def match_templates_in_crop(crop, region, names, anchor_xy, threshold=None,
