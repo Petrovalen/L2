@@ -79,8 +79,9 @@ class BotRunner:
                         f"({status['target_hp']}%)"
                     )
 
-                # начать перерыв, если пора и сейчас безопасно
-                if (config.BREAKS_ENABLED and breaks.due(mono)
+                # начать перерыв, если пора и сейчас безопасно (в АССИСТЕ — не делаем:
+                # бот идёт за таргетом игрока и не должен отставать)
+                if (config.BREAKS_ENABLED and not config.ASSIST_MODE and breaks.due(mono)
                         and status["state"] == "SEARCH" and not status["target"]
                         and (status["hp"] or 0) >= config.BREAK_SAFE_HP):
                     dur = breaks.start(mono)

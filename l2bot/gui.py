@@ -148,7 +148,7 @@ class BotWorker(threading.Thread):
 
         self.q.put(("log", "Бот работает."))
         breaks = BreakScheduler(time.monotonic())
-        if config.BREAKS_ENABLED:
+        if config.BREAKS_ENABLED and not config.ASSIST_MODE:
             self.q.put(("log", f"Следующий перерыв через ~{int(breaks.until_due(time.monotonic()))} c."))
         deferred_logged = False
         try:
@@ -181,8 +181,9 @@ class BotWorker(threading.Thread):
                         self.q.put(("log", f"Состояние → {status['state']}"))
                         self._last_state = status["state"]
 
-                    # перерыв: стартуем только в безопасный момент
-                    if config.BREAKS_ENABLED and breaks.due(mono):
+                    # перерыв: стартуем только в безопасный момент. В АССИСТЕ не
+                    # делаем — бот идёт за таргетом игрока и не должен отставать.
+                    if config.BREAKS_ENABLED and not config.ASSIST_MODE and breaks.due(mono):
                         safe = (status["state"] == "SEARCH" and not status["target"]
                                 and (status["hp"] or 0) >= config.BREAK_SAFE_HP)
                         # target_nearest в только что прошедшем тике мог выделить
@@ -805,6 +806,14 @@ class App:
         settings.set("vision_targeting", v)
         self.mob_status.set(f"Визуальный поиск: {'включён' if v else 'выключен'}")
 
+    def _on_loot_toggle(self):
+        v = bool(self.loot_enabled.get())
+        config.LOOT_ENABLED = v
+        settings.set("loot_enabled", v)
+        self._ctrl_status.set("Сбор лута включён." if v
+                              else "Сбор лута ВЫКЛючен — после убийства сразу ищу следующего.")
+        self._append_log("Сбор лута: %s" % ("включён" if v else "выключен"))
+
     def _on_assist_toggle(self):
         v = bool(self.assist_mode.get())
         config.ASSIST_MODE = v
@@ -1012,6 +1021,10 @@ class App:
         self._loot_presses_max_var = tk.IntVar(value=int(config.LOOT_PRESSES_MAX))
         tk.Spinbox(lootrow, from_=1, to=10, width=4,
                    textvariable=self._loot_presses_max_var).pack(side="left")
+        self.loot_enabled = tk.BooleanVar(value=bool(getattr(config, "LOOT_ENABLED", True)))
+        tk.Checkbutton(kf, text="Собирать лут (после убийства подбирать предметы)",
+                       variable=self.loot_enabled,
+                       command=self._on_loot_toggle).pack(anchor="w", padx=6, pady=(4, 0))
         self.assist_mode = tk.BooleanVar(value=config.ASSIST_MODE)
         tk.Checkbutton(kf, text="Режим ассиста (бить по цели другого игрока, а не выбирать самому)",
                        variable=self.assist_mode,

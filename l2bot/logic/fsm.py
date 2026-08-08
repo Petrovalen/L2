@@ -814,8 +814,9 @@ class BotFSM:
     def _enter_loot(self, now, reason=""):
         """Перейти к сбору лута: труп ещё виден — гасим вижн-клик по его точке.
         reason — по какому признаку признали смерть (для лога/диагностики)."""
+        loot_on = getattr(config, "LOOT_ENABLED", True)
         if reason:
-            ctl.emit("моб мёртв (%s) -> лут" % reason)
+            ctl.emit("моб мёртв (%s)%s" % (reason, " -> лут" if loot_on else " -> лут выкл, ищу дальше"))
         self._no_dmg_streak = 0          # моб убит -> не застряли (сброс эскалации)
         self._prefer_vision_until = 0.0
         # В режиме АССИСТА лут НЕ собираем — сразу назад в поиск (берём след. ассист).
@@ -823,8 +824,12 @@ class BotFSM:
             self._to_search(now)
             return
         if self._last_click is not None:
-            self._avoid_point = self._last_click
+            self._avoid_point = self._last_click   # свежий труп больше не кликаем
             self._avoid_until = now + config.KILL_AVOID_SEC
+        # Сбор лута выключен галочкой — в поиск без входа в LOOT.
+        if not loot_on:
+            self._to_search(now)
+            return
         self.state = LOOT
         self._loot_started = now
         self._loot_presses = 0

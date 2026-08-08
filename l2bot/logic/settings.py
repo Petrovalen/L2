@@ -62,6 +62,7 @@ _CONFIG_OVERRIDES = {
     "camera_interval": "CAMERA_INTERVAL",
     "camera_drag_distance": "CAMERA_DRAG_DISTANCE",
     "camera_step_duration": "CAMERA_STEP_DURATION",
+    "loot_enabled": "LOOT_ENABLED",
     "loot_presses_min": "LOOT_PRESSES_MIN",
     "loot_presses_max": "LOOT_PRESSES_MAX",
     "death_notify": "DEATH_NOTIFY",
