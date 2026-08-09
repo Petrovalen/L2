@@ -234,26 +234,30 @@ def _digit_on(name):
     return d if (d and d.get("enabled")) else None
 
 
-def read_self_bars(frame):
+def read_one(frame, name):
     """
-    HP/MP/CP персонажа в процентах. Приоритет: режим цифр (OCR) -> калиброванная
-    рамка (пиксели) -> старый config. Если цифры не прочитались — откат на пиксели.
+    Процент ОДНОЙ полоски по её имени (hp/mp/cp, а также hp2/mp2 для второго
+    окна). Приоритет: режим цифр (OCR) -> калиброванная рамка (пиксели) -> старый
+    config. Если цифры не прочитались — откат на пиксели.
     """
-    result = {}
-    for name in ("hp", "mp", "cp"):
-        spec = _bar_spec(name)
-        don = _digit_on(name)
-        if don and spec:                 # числа читаем из области самого бара
-            val = _digit_percent(frame, name, spec, don.get("max"))
-            if val is not None:
-                result[name] = val
-                continue                 # цифры прочитались — берём их
-        if spec:
-            result[name] = round(_fill_edge(_region_density(frame, spec)) * 100.0, 1)
-        else:
-            cfg = config.BARS.get(name)
-            result[name] = read_bar(frame, cfg) if cfg else 0.0
-    return result
+    spec = _bar_spec(name)
+    don = _digit_on(name)
+    if don and spec:                     # числа читаем из области самого бара
+        val = _digit_percent(frame, name, spec, don.get("max"))
+        if val is not None:
+            return val
+    if spec:
+        return round(_fill_edge(_region_density(frame, spec)) * 100.0, 1)
+    cfg = config.BARS.get(name)
+    return read_bar(frame, cfg) if cfg else 0.0
+
+
+def read_self_bars(frame, suffix=""):
+    """
+    HP/MP/CP персонажа в процентах (ключи всегда 'hp'/'mp'/'cp'). suffix='2'
+    читает полоски ВТОРОГО окна (bar_hp2/bar_mp2/...) — для режима двух окон.
+    """
+    return {name: read_one(frame, name + suffix) for name in ("hp", "mp", "cp")}
 
 
 def has_target(frame):

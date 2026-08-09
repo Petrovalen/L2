@@ -43,6 +43,9 @@ _MACHINE_KEYS = {
     "bar_hp_digits", "bar_mp_digits", "bar_cp_digits", "bar_target_digits",
     "target_name_region", "search_region", "buff_region", "character_anchor",
     "vision_exclude_region", "death_region",
+    "dual_focus_1", "dual_focus_2",     # точки клика для активации окон 1/2 (dual-box)
+    "bar_hp2", "bar_mp2",               # полоски HP/MP ВТОРОГО окна (dual-box)
+    "buff_region2",                     # баф-бар ВТОРОГО окна (для его селф-баффов)
 }
 # Ключи, относящиеся к ПРОФИЛЮ ПЕРСОНАЖА (зависят от класса).
 _CHARACTER_KEYS = {"keys", "skills", "heal", "mp_potion", "buffs", "rest", "mobs"}
@@ -73,6 +76,7 @@ _CONFIG_OVERRIDES = {
     "camera_settle": "CAMERA_SETTLE",
     "hotkey_stop": "HOTKEY_STOP",
     "assist_mode": "ASSIST_MODE",
+    "dual_box_enabled": "DUAL_BOX_ENABLED",
 }
 
 

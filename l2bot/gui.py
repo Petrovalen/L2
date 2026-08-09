@@ -25,6 +25,7 @@ import keyboard
 import config
 from capture.screen import ScreenCapture
 from logic.fsm import BotFSM
+from logic.support import SupportController
 from logic.humanize import BreakScheduler
 from logic import mob_list
 from logic import settings, notify
@@ -114,6 +115,7 @@ class BotWorker(threading.Thread):
         self._pause = threading.Event()
         self._stop = threading.Event()
         self.fsm = BotFSM()
+        self.support = SupportController()   # поддержка вторым окном (dual-box)
         self._last_state = None
 
     # --- управление извне (потокобезопасно через Event) ---
@@ -176,6 +178,11 @@ class BotWorker(threading.Thread):
                             continue
 
                     status = self.fsm.tick(frame, now)
+                    # поддержка вторым окном (dual-box): следит за HP/MP первого и
+                    # при просадке коротко переключает фокус на 2-е окно и кастует.
+                    # Состояние FSM: баффы льём только в SEARCH, а хил в бою -> потом
+                    # ре-таргет окна 1 (его цель слетает за фокус-дэнс).
+                    self.support.maybe_act(frame, now, status["state"])
                     self.q.put(("status", status))
                     if status["state"] != self._last_state:
                         self.q.put(("log", f"Состояние → {status['state']}"))
@@ -1129,6 +1136,109 @@ class App:
         tk.Button(bf, text="＋ Добавить бафф",
                   command=self._add_buff_row).pack(anchor="w", padx=8, pady=4)
 
+        # --- игра в два окна: поддержка вторым окном (dual-box) ---
+        df = ttk.LabelFrame(win, text="Игра в два окна: поддержка вторым окном (dual-box)")
+        df.pack(fill="x", padx=10, pady=6)
+        self.dual_enabled = tk.BooleanVar(value=bool(getattr(config, "DUAL_BOX_ENABLED", False)))
+        tk.Checkbutton(df, text="Включить режим (2-е окно лечит/даёт ману первому)",
+                       variable=self.dual_enabled,
+                       command=self._on_dual_toggle).pack(anchor="w", padx=6, pady=(4, 0))
+        dhint = ("Оба клиента — в ОКОННОМ режиме на одном мониторе. «Точка фокуса» — безопасное\n"
+                 "место окна (заголовок или пустой угол UI): туда бот кликает, чтобы активировать\n"
+                 "окно перед вводом. «Клавиша выбрать первого» — хоткей выбора члена группы в окне 2.\n"
+                 "Хил/мана кастуются, когда HP/MP первого опустилось до порога.")
+        tk.Label(df, text=dhint, font=("Segoe UI", 8), fg="#1565c0",
+                 justify="left", anchor="w").pack(fill="x", padx=8, pady=(2, 2))
+        frow = tk.Frame(df)
+        frow.pack(fill="x", padx=8, pady=2)
+        self._dual_focus1_lbl = tk.StringVar()
+        self._dual_focus2_lbl = tk.StringVar()
+        self._refresh_dual_focus_labels()
+        tk.Button(frow, text="Точка фокуса ОКНА 1",
+                  command=lambda: self._calibrate_dual_focus(1)).pack(side="left", padx=2)
+        tk.Label(frow, textvariable=self._dual_focus1_lbl, width=11).pack(side="left")
+        tk.Button(frow, text="Точка фокуса ОКНА 2",
+                  command=lambda: self._calibrate_dual_focus(2)).pack(side="left", padx=(10, 2))
+        tk.Label(frow, textvariable=self._dual_focus2_lbl, width=11).pack(side="left")
+        prow = tk.Frame(df)
+        prow.pack(fill="x", padx=8, pady=2)
+        tk.Label(prow, text="Клавиша «выбрать первого» (в окне 2)",
+                 width=32, anchor="w").pack(side="left")
+        self.dual_party_key = tk.StringVar(value=str(settings.get("dual_party_key") or ""))
+        tk.Entry(prow, textvariable=self.dual_party_key, width=6).pack(side="left")
+        tk.Label(prow, text="   Клавиша «следовать»").pack(side="left")
+        self.dual_follow_key = tk.StringVar(value=str(settings.get("dual_follow_key") or ""))
+        tk.Entry(prow, textvariable=self.dual_follow_key, width=6).pack(side="left")
+        tk.Label(prow, text="   Некст-таргет окна 1 (после хила в бою)").pack(side="left")
+        self.dual_retarget_key = tk.StringVar(value=str(settings.get("dual_retarget_key") or ""))
+        tk.Entry(prow, textvariable=self.dual_retarget_key, width=6).pack(side="left")
+        # полоски ВТОРОГО окна (его собственные HP/MP)
+        brow2 = tk.Frame(df)
+        brow2.pack(fill="x", padx=8, pady=2)
+        tk.Label(brow2, text="Полоски окна 2:", width=14, anchor="w").pack(side="left")
+        self._dual_hp2_lbl = tk.StringVar()
+        self._dual_mp2_lbl = tk.StringVar()
+        self._refresh_dual_bar_labels()
+        tk.Button(brow2, text="HP окна 2",
+                  command=lambda: self._calibrate_bar("hp2")).pack(side="left", padx=2)
+        tk.Label(brow2, textvariable=self._dual_hp2_lbl, width=8).pack(side="left")
+        tk.Button(brow2, text="MP окна 2",
+                  command=lambda: self._calibrate_bar("mp2")).pack(side="left", padx=(8, 2))
+        tk.Label(brow2, textvariable=self._dual_mp2_lbl, width=8).pack(side="left")
+        mrow = tk.Frame(df)
+        mrow.pack(fill="x", padx=8, pady=2)
+        tk.Label(mrow, text="Не кастовать на первого, если MP окна 2 ≤ % (0 = без проверки)",
+                 anchor="w").pack(side="left")
+        self.dual_min_mp2 = tk.IntVar(value=int(settings.get("dual_min_mp2") or 0))
+        tk.Spinbox(mrow, from_=0, to=99, width=4,
+                   textvariable=self.dual_min_mp2).pack(side="left", padx=4)
+        self._dual_heal_vars = self._dual_skill_to_vars(settings.get("dual_heal") or {}, 60)
+        self._dual_mana_vars = self._dual_skill_to_vars(settings.get("dual_mana") or {}, 40)
+        self._dual_selfheal_vars = self._dual_skill_to_vars(settings.get("dual_selfheal") or {}, 50)
+        self._render_dual_skill_row(df, self._dual_heal_vars, "Хил первого, если HP1 ≤ %")
+        self._render_dual_skill_row(df, self._dual_mana_vars, "Мана первому, если MP1 ≤ %")
+        self._render_dual_skill_row(df, self._dual_selfheal_vars, "Селф-хил окна 2, если HP2 ≤ %")
+        tk.Label(df, text="Баффы первого (окно 2 держит их на первом). «Иконка» — обведи иконку\n"
+                          "баффа на баф-баре ПЕРВОГО (та же зона, что «Зона панели баффов»).",
+                 font=("Segoe UI", 8), fg="#1565c0", justify="left",
+                 anchor="w").pack(fill="x", padx=8, pady=(6, 0))
+        dbhead = tk.Frame(df)
+        dbhead.pack(fill="x", padx=8)
+        for text, w in (("вкл", 3), ("Имя", 14), ("Клав", 6), ("", 14)):
+            tk.Label(dbhead, text=text, width=w, anchor="w",
+                     font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
+        self._dual_buffs_box = tk.Frame(df)
+        self._dual_buffs_box.pack(fill="x", padx=4)
+        self._dual_buff_vars = [self._dual_buff_to_vars(b)
+                                for b in (settings.get("dual_buffs") or [])]
+        self._render_dual_buff_rows()
+        tk.Button(df, text="＋ Добавить бафф первому",
+                  command=self._add_dual_buff_row).pack(anchor="w", padx=8, pady=4)
+        # селф-баффы ОКНА 2 (окно 2 держит их на себе, когда окно 1 в поиске)
+        sbrow = tk.Frame(df)
+        sbrow.pack(fill="x", padx=8, pady=(6, 0))
+        self._dual_bufreg2_lbl = tk.StringVar()
+        self._refresh_dual_bufreg2_label()
+        tk.Button(sbrow, text="Зона баффов окна 2",
+                  command=self.set_buff_region2).pack(side="left")
+        tk.Label(sbrow, textvariable=self._dual_bufreg2_lbl, width=11).pack(side="left", padx=4)
+        tk.Label(df, text="Селф-баффы окна 2 (окно 2 держит их на СЕБЕ, вне боя первого).\n"
+                          "«Иконка» — иконка баффа на баф-баре ОКНА 2.",
+                 font=("Segoe UI", 8), fg="#1565c0", justify="left",
+                 anchor="w").pack(fill="x", padx=8, pady=(2, 0))
+        sbhead = tk.Frame(df)
+        sbhead.pack(fill="x", padx=8)
+        for text, w in (("вкл", 3), ("Имя", 14), ("Клав", 6), ("", 14)):
+            tk.Label(sbhead, text=text, width=w, anchor="w",
+                     font=("Segoe UI", 8, "bold")).pack(side="left", padx=1)
+        self._dual_selfbuffs_box = tk.Frame(df)
+        self._dual_selfbuffs_box.pack(fill="x", padx=4)
+        self._dual_selfbuff_vars = [self._dual_buff_to_vars(b)
+                                    for b in (settings.get("dual_selfbuffs") or [])]
+        self._render_dual_selfbuff_rows()
+        tk.Button(df, text="＋ Добавить селф-бафф окна 2",
+                  command=self._add_dual_selfbuff_row).pack(anchor="w", padx=8, pady=4)
+
         # --- статус + сохранить ---
         self._ctrl_status = tk.StringVar(value="")
         tk.Label(win, textvariable=self._ctrl_status, font=("Segoe UI", 8),
@@ -1156,6 +1266,179 @@ class App:
             "exit_hp": tk.IntVar(value=int(cfg.get("exit_hp", 90))),
             "exit_mp": tk.IntVar(value=int(cfg.get("exit_mp", 90))),
         }
+
+    # --- игра в два окна (dual-box) ---
+    def _dual_skill_to_vars(self, cfg, default_pct):
+        return {
+            "enabled": tk.BooleanVar(value=bool(cfg.get("enabled", False))),
+            "key": tk.StringVar(value=str(cfg.get("key") or "")),
+            "percent": tk.IntVar(value=int(cfg.get("percent", default_pct))),
+            "cooldown": tk.DoubleVar(value=float(cfg.get("cooldown", 3.0))),
+        }
+
+    def _render_dual_skill_row(self, parent, v, label):
+        row = tk.Frame(parent)
+        row.pack(fill="x", padx=8, pady=2)
+        tk.Checkbutton(row, variable=v["enabled"]).pack(side="left")
+        tk.Label(row, text=label, width=24, anchor="w").pack(side="left")
+        tk.Spinbox(row, from_=1, to=99, width=4, textvariable=v["percent"]).pack(side="left")
+        tk.Label(row, text="  клавиша").pack(side="left")
+        tk.Entry(row, textvariable=v["key"], width=6).pack(side="left", padx=2)
+        tk.Label(row, text="КД").pack(side="left")
+        tk.Spinbox(row, from_=0.0, to=60.0, increment=0.5, width=5,
+                   textvariable=v["cooldown"]).pack(side="left", padx=2)
+
+    def _dual_skill_from_vars(self, v):
+        try:
+            pct = max(1, min(99, int(v["percent"].get())))
+            cd = max(0.0, float(v["cooldown"].get()))
+        except (tk.TclError, ValueError):
+            pct, cd = 50, 3.0
+        return {"enabled": bool(v["enabled"].get()), "key": v["key"].get().strip(),
+                "percent": pct, "cooldown": cd}
+
+    def _refresh_dual_focus_labels(self):
+        for n, var in ((1, self._dual_focus1_lbl), (2, self._dual_focus2_lbl)):
+            p = settings.get("dual_focus_%d" % n)
+            var.set("(%d,%d)" % (p["x"], p["y"]) if p else "не задана")
+
+    def _refresh_dual_bar_labels(self):
+        for key, var in (("bar_hp2", self._dual_hp2_lbl), ("bar_mp2", self._dual_mp2_lbl)):
+            var.set("задана ✓" if settings.get(key) else "не задана")
+
+    def _calibrate_dual_focus(self, n):
+        self._select_region(
+            "Обведи рамкой БЕЗОПАСНОЕ место окна %d (заголовок/пустой угол) — "
+            "центр рамки станет точкой клика для активации окна.  Esc — отмена" % n,
+            lambda l, t, w, h: self._save_dual_focus(n, l, t, w, h))
+
+    def _save_dual_focus(self, n, left, top, w, h):
+        point = {"x": int(left + w // 2), "y": int(top + h // 2)}
+        settings.set("dual_focus_%d" % n, point)
+        self._refresh_dual_focus_labels()
+        self._ctrl_status.set("Точка фокуса окна %d: (%d,%d)" % (n, point["x"], point["y"]))
+        self._append_log("Dual-box: точка фокуса окна %d = (%d,%d)"
+                         % (n, point["x"], point["y"]))
+
+    def _dual_buff_to_vars(self, b):
+        return {"enabled": tk.BooleanVar(value=bool(b.get("enabled", True))),
+                "label": tk.StringVar(value=str(b.get("label") or "")),
+                "key": tk.StringVar(value=str(b.get("key") or ""))}
+
+    def _add_dual_buff_row(self):
+        self._dual_buff_vars.append(self._dual_buff_to_vars({}))
+        self._render_dual_buff_rows()
+
+    def _del_dual_buff_row(self, idx):
+        if 0 <= idx < len(self._dual_buff_vars):
+            self._dual_buff_vars.pop(idx)
+            self._render_dual_buff_rows()
+
+    def _render_dual_buff_rows(self):
+        for w in self._dual_buffs_box.winfo_children():
+            w.destroy()
+        for idx, v in enumerate(self._dual_buff_vars):
+            row = tk.Frame(self._dual_buffs_box)
+            row.pack(fill="x", pady=1)
+            tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["label"], width=14).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["key"], width=6).pack(side="left", padx=1)
+            tk.Button(row, text="Иконка", width=7,
+                      command=lambda i=idx: self._capture_dual_buff_icon(i)).pack(side="left", padx=1)
+            tk.Button(row, text="✕", width=2,
+                      command=lambda i=idx: self._del_dual_buff_row(i)).pack(side="left")
+
+    def _capture_dual_buff_icon(self, idx):
+        if not (0 <= idx < len(self._dual_buff_vars)):
+            return
+        label = self._dual_buff_vars[idx]["label"].get().strip()
+        if not label:
+            self._ctrl_status.set("Сначала впиши имя баффа (для файла иконки).")
+            return
+        self._select_region(
+            f"Наложи бафф «{label}» на первого, затем обведи его ИКОНКУ на баф-баре первого   Esc — отмена",
+            lambda l, t, w, h: self._save_dual_buff_icon(label, l, t, w, h))
+
+    def _save_dual_buff_icon(self, label, left, top, w, h):
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+            ok = targets.save_buff_template(
+                frame, {"left": left, "top": top, "width": w, "height": h}, "d2_" + label)
+        except Exception as e:
+            self._ctrl_status.set(f"Ошибка захвата иконки: {e}")
+            return
+        self._ctrl_status.set(f"Иконка баффа «{label}» (окно 2) сохранена ({w}x{h})."
+                              if ok else "Иконку сохранить не удалось.")
+
+    def _refresh_dual_bufreg2_label(self):
+        self._dual_bufreg2_lbl.set("задана ✓" if settings.get("buff_region2") else "не задана")
+
+    def set_buff_region2(self):
+        self._select_region(
+            "Обведи ЗОНУ панели баффов ОКНА 2 (где иконки баффов второго персонажа)   Esc — отмена",
+            self._save_buff_region2)
+
+    def _save_buff_region2(self, left, top, w, h):
+        settings.set("buff_region2", {"left": left, "top": top, "width": w, "height": h})
+        self._refresh_dual_bufreg2_label()
+        self._ctrl_status.set(f"Зона баффов окна 2 задана: {w}x{h} @ ({left},{top})")
+        self._append_log(f"Dual-box: зона баффов окна 2 = {w}x{h} @ ({left},{top})")
+
+    def _add_dual_selfbuff_row(self):
+        self._dual_selfbuff_vars.append(self._dual_buff_to_vars({}))
+        self._render_dual_selfbuff_rows()
+
+    def _del_dual_selfbuff_row(self, idx):
+        if 0 <= idx < len(self._dual_selfbuff_vars):
+            self._dual_selfbuff_vars.pop(idx)
+            self._render_dual_selfbuff_rows()
+
+    def _render_dual_selfbuff_rows(self):
+        for w in self._dual_selfbuffs_box.winfo_children():
+            w.destroy()
+        for idx, v in enumerate(self._dual_selfbuff_vars):
+            row = tk.Frame(self._dual_selfbuffs_box)
+            row.pack(fill="x", pady=1)
+            tk.Checkbutton(row, variable=v["enabled"], width=2).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["label"], width=14).pack(side="left", padx=1)
+            tk.Entry(row, textvariable=v["key"], width=6).pack(side="left", padx=1)
+            tk.Button(row, text="Иконка", width=7,
+                      command=lambda i=idx: self._capture_dual_selfbuff_icon(i)).pack(side="left", padx=1)
+            tk.Button(row, text="✕", width=2,
+                      command=lambda i=idx: self._del_dual_selfbuff_row(i)).pack(side="left")
+
+    def _capture_dual_selfbuff_icon(self, idx):
+        if not (0 <= idx < len(self._dual_selfbuff_vars)):
+            return
+        label = self._dual_selfbuff_vars[idx]["label"].get().strip()
+        if not label:
+            self._ctrl_status.set("Сначала впиши имя селф-баффа (для файла иконки).")
+            return
+        self._select_region(
+            f"Наложи селф-бафф «{label}» на окно 2, затем обведи его ИКОНКУ на баф-баре окна 2   Esc — отмена",
+            lambda l, t, w, h: self._save_dual_selfbuff_icon(label, l, t, w, h))
+
+    def _save_dual_selfbuff_icon(self, label, left, top, w, h):
+        try:
+            with ScreenCapture() as cap:
+                frame = cap.grab()
+            ok = targets.save_buff_template(
+                frame, {"left": left, "top": top, "width": w, "height": h}, "d2s_" + label)
+        except Exception as e:
+            self._ctrl_status.set(f"Ошибка захвата иконки: {e}")
+            return
+        self._ctrl_status.set(f"Иконка селф-баффа «{label}» (окно 2) сохранена ({w}x{h})."
+                              if ok else "Иконку сохранить не удалось.")
+
+    def _on_dual_toggle(self):
+        v = bool(self.dual_enabled.get())
+        config.DUAL_BOX_ENABLED = v
+        settings.set("dual_box_enabled", v)
+        self._ctrl_status.set(
+            "Игра в два окна ВКЛ — задай точки фокуса, клавишу выбора первого и хил/ману, потом сохрани."
+            if v else "Игра в два окна выключена.")
+        self._append_log("Игра в два окна: %s" % ("включена" if v else "выключена"))
 
     def _set_rest_vars(self, v, cfg):
         v["enabled"].set(bool(cfg.get("enabled", False)))
@@ -1423,6 +1706,31 @@ class App:
         settings.set("buffs", buffs)
         settings.set("loot_presses_min", loot_min)
         settings.set("loot_presses_max", loot_max)
+        # игра в два окна (dual-box)
+        settings.set("dual_party_key", self.dual_party_key.get().strip())
+        settings.set("dual_follow_key", self.dual_follow_key.get().strip())
+        settings.set("dual_retarget_key", self.dual_retarget_key.get().strip())
+        settings.set("dual_heal", self._dual_skill_from_vars(self._dual_heal_vars))
+        settings.set("dual_mana", self._dual_skill_from_vars(self._dual_mana_vars))
+        settings.set("dual_selfheal", self._dual_skill_from_vars(self._dual_selfheal_vars))
+        try:
+            settings.set("dual_min_mp2", max(0, min(99, int(self.dual_min_mp2.get()))))
+        except (tk.TclError, ValueError):
+            settings.set("dual_min_mp2", 0)
+        dual_buffs = []
+        for v in self._dual_buff_vars:
+            lbl = v["label"].get().strip()
+            if lbl:
+                dual_buffs.append({"enabled": bool(v["enabled"].get()), "label": lbl,
+                                   "key": v["key"].get().strip()})
+        settings.set("dual_buffs", dual_buffs)
+        dual_selfbuffs = []
+        for v in self._dual_selfbuff_vars:
+            lbl = v["label"].get().strip()
+            if lbl:
+                dual_selfbuffs.append({"enabled": bool(v["enabled"].get()), "label": lbl,
+                                       "key": v["key"].get().strip()})
+        settings.set("dual_selfbuffs", dual_selfbuffs)
         settings.apply_to_config()   # применить сразу (в т.ч. на работающем боте)
         self._ctrl_status.set(
             f"Сохранено: {len([s for s in skills if s['key']])} способностей, "
@@ -1557,6 +1865,10 @@ class App:
             ("Не искать (труп)", settings.get("vision_exclude_region"), "#ff1744"),
             ("Персонаж", settings.get("character_anchor"), "#ea80fc"),
             ("Баффы", settings.get("buff_region"), "#ffffff"),
+            # --- зоны ВТОРОГО окна (dual-box) ---
+            ("HP окно2", settings.get("bar_hp2"), "#ff8a80"),
+            ("MP окно2", settings.get("bar_mp2"), "#82b1ff"),
+            ("Баффы окно2", settings.get("buff_region2"), "#b0bec5"),
         ]
         for label, r, color in zones:
             if not r:
@@ -1565,6 +1877,16 @@ class App:
             w, h = int(r["width"]), int(r["height"])
             cv.create_rectangle(l, t, l + w, t + h, outline=color, width=2)
             cv.create_text(l + 2, max(6, t - 8), text=label, fill=color,
+                           anchor="w", font=("Segoe UI", 8, "bold"))
+        # точки фокуса окон (dual-box) — рисуем кружком, это точки {x,y}, не рамки
+        for label, key, color in (("Фокус1", "dual_focus_1", "#00e676"),
+                                   ("Фокус2", "dual_focus_2", "#ff4081")):
+            p = settings.get(key)
+            if not p or "x" not in p:
+                continue
+            x, y = int(p["x"]), int(p["y"])
+            cv.create_oval(x - 7, y - 7, x + 7, y + 7, outline=color, width=2)
+            cv.create_text(x + 10, y, text=label, fill=color,
                            anchor="w", font=("Segoe UI", 8, "bold"))
         self._draw_buff_icons(cv)
 
@@ -1680,9 +2002,11 @@ class App:
             "cp": "Обведи ЖЁЛТУЮ полоску CP — она должна быть ПОЛНОЙ   (Esc — отмена)",
             "target": ("СНАЧАЛА ВЫДЕЛИ МОБА (нужна красная полоска HP цели), "
                        "затем обведи её ПОЛНОЙ   (Esc — отмена)"),
+            "hp2": "ОКНО 2: обведи КРАСНУЮ полоску HP второго окна (ПОЛНОЙ)   (Esc — отмена)",
+            "mp2": "ОКНО 2: обведи СИНЮЮ полоску MP второго окна (ПОЛНОЙ)   (Esc — отмена)",
         }
         self._select_region(
-            hints[name],
+            hints.get(name, "Обведи полоску (ПОЛНОЙ)   (Esc — отмена)"),
             lambda l, t, w, h: self._save_bar(name, l, t, w, h))
 
     def calibrate_target_name(self):
@@ -1762,7 +2086,7 @@ class App:
         # HP и HP цели — КРАСНЫЕ (в BGR: R заметно больше B и G). Если пойман не
         # красный цвет, калибровка почти наверняка промахнулась (нет выделенного
         # моба / рамка на фоне) — предупреждаем и НЕ сохраняем кривой цвет.
-        if name in ("hp", "target"):
+        if name in ("hp", "hp2", "target"):
             b, g, r = color
             if not (r > b + 30 and r > g + 30):
                 who = "HP цели" if name == "target" else "HP"
@@ -1780,9 +2104,11 @@ class App:
             self.calib_status.set(
                 f"Цель: {'есть' if present else 'нет'} ({hp}%), цвет BGR {color}")
         else:
-            val = bars.read_self_bars(frame).get(name)
+            val = bars.read_one(frame, name)
             self.calib_status.set(f"{name.upper()}: читается {val}%, цвет BGR {color}")
         self._append_log(f"Калибрована полоска {name}: {w}x{h}, цвет {color}")
+        if name in ("hp2", "mp2") and hasattr(self, "_dual_hp2_lbl"):
+            self._refresh_dual_bar_labels()
 
     def _update_hotkey_label(self):
         self.hotkey_lbl.set(
