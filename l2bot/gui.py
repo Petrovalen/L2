@@ -182,7 +182,7 @@ class BotWorker(threading.Thread):
                     # при просадке коротко переключает фокус на 2-е окно и кастует.
                     # Состояние FSM: баффы льём только в SEARCH, а хил в бою -> потом
                     # ре-таргет окна 1 (его цель слетает за фокус-дэнс).
-                    self.support.maybe_act(frame, now, status["state"])
+                    self.support.maybe_act(frame, now, status["state"], self.fsm)
                     self.q.put(("status", status))
                     if status["state"] != self._last_state:
                         self.q.put(("log", f"Состояние → {status['state']}"))
@@ -427,6 +427,10 @@ class App:
         tk.Checkbutton(setframe, text="Проверять имя цели (некст-таргет)",
                        variable=self.namefilter_var,
                        command=self._on_namefilter_toggle).pack(anchor="w", padx=6)
+        self.nexttarget_var = tk.BooleanVar(value=bool(getattr(config, "SEARCH_NEXT_TARGET", False)))
+        tk.Checkbutton(setframe, text="Искать «следующую цель» (а не ближайшую)",
+                       variable=self.nexttarget_var,
+                       command=self._on_nexttarget_toggle).pack(anchor="w", padx=6)
         self.debug_var = tk.BooleanVar(value=False)
         tk.Checkbutton(setframe, text="Показывать рамки мобов (отладка)",
                        variable=self.debug_var,
@@ -813,6 +817,12 @@ class App:
         settings.set("vision_targeting", v)
         self.mob_status.set(f"Визуальный поиск: {'включён' if v else 'выключен'}")
 
+    def _on_nexttarget_toggle(self):
+        v = bool(self.nexttarget_var.get())
+        config.SEARCH_NEXT_TARGET = v
+        settings.set("search_next_target", v)
+        self.mob_status.set("Поиск: %s" % ("следующая цель" if v else "ближайшая цель"))
+
     def _on_loot_toggle(self):
         v = bool(self.loot_enabled.get())
         config.LOOT_ENABLED = v
@@ -1169,9 +1179,6 @@ class App:
         tk.Label(prow, text="   Клавиша «следовать»").pack(side="left")
         self.dual_follow_key = tk.StringVar(value=str(settings.get("dual_follow_key") or ""))
         tk.Entry(prow, textvariable=self.dual_follow_key, width=6).pack(side="left")
-        tk.Label(prow, text="   Некст-таргет окна 1 (после хила в бою)").pack(side="left")
-        self.dual_retarget_key = tk.StringVar(value=str(settings.get("dual_retarget_key") or ""))
-        tk.Entry(prow, textvariable=self.dual_retarget_key, width=6).pack(side="left")
         # полоски ВТОРОГО окна (его собственные HP/MP)
         brow2 = tk.Frame(df)
         brow2.pack(fill="x", padx=8, pady=2)
@@ -1308,8 +1315,8 @@ class App:
 
     def _calibrate_dual_focus(self, n):
         self._select_region(
-            "Обведи рамкой БЕЗОПАСНОЕ место окна %d (заголовок/пустой угол) — "
-            "центр рамки станет точкой клика для активации окна.  Esc — отмена" % n,
+            "Обведи точку в ИГРОВОМ МИРЕ окна %d (не по заголовку!). Активация идёт "
+            "ПРАВОЙ кнопкой — она не сбивает таргет.  Esc — отмена" % n,
             lambda l, t, w, h: self._save_dual_focus(n, l, t, w, h))
 
     def _save_dual_focus(self, n, left, top, w, h):
@@ -1709,7 +1716,6 @@ class App:
         # игра в два окна (dual-box)
         settings.set("dual_party_key", self.dual_party_key.get().strip())
         settings.set("dual_follow_key", self.dual_follow_key.get().strip())
-        settings.set("dual_retarget_key", self.dual_retarget_key.get().strip())
         settings.set("dual_heal", self._dual_skill_from_vars(self._dual_heal_vars))
         settings.set("dual_mana", self._dual_skill_from_vars(self._dual_mana_vars))
         settings.set("dual_selfheal", self._dual_skill_from_vars(self._dual_selfheal_vars))

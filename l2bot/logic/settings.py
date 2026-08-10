@@ -56,6 +56,7 @@ _DEFAULT = "default"
 # переопределять из панели.
 _CONFIG_OVERRIDES = {
     "vision_targeting": "VISION_TARGETING",
+    "search_next_target": "SEARCH_NEXT_TARGET",
     "name_click_dx": "NAME_CLICK_DX",
     "name_click_dy": "NAME_CLICK_DY",
     "vision_interval": "VISION_INTERVAL",

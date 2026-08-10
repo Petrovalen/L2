@@ -76,6 +76,7 @@ class BotFSM:
         self._last_view_rotate = 0.0    # последний доворот камеры к цели
         self._target_seen = False       # цель хоть раз попадала в кадр за этот бой
         self._last_dead_dbg = 0.0        # троттл лога метки смерти (диагностика)
+        self._last_acquire_at = None     # когда последний раз вошли в бой (уход от неба)
 
     # ---- вспомогательные проверки ---------------------------------------
     def _survival(self, self_bars):
@@ -287,6 +288,8 @@ class BotFSM:
             return
         if self._search_started is None:
             self._search_started = now
+        if self._last_acquire_at is None:
+            self._last_acquire_at = now
         # только что кликнули визуально — ждём, пока цель зарегистрируется
         if now < self._acquire_lock_until:
             return
@@ -300,14 +303,19 @@ class BotFSM:
         self._vision_pending = False    # окно ожидания вижн-цели прошло (клик мимо)
         # «Застряли» на недостижимом мобе: target_nearest тянет ТОГО ЖЕ, поэтому
         # временно его НЕ жмём — ищем ДРУГОГО визуально (вижн-клик избегает
-        # забаненной точки недостижимого моба).
-        prefer_vision = now < self._prefer_vision_until
-        # 1) СНАЧАЛА обычный выбор цели клавишей (кроме режима «застряли»). Первый
-        #    выбор после человеческой паузы — через СЛЕДУЮЩУЮ цель (next_target),
-        #    чтобы не переоткрыть труп/того же моба рядом; далее — как обычно.
+        # забаненной точки недостижимого моба). Имеет смысл ТОЛЬКО с визуалом:
+        # без него всё равно жмём клавишу (иначе в режиме «без визуала» бот залипнет).
+        prefer_vision = config.VISION_TARGETING and (now < self._prefer_vision_until)
+        # 1) СНАЧАЛА обычный выбор цели клавишей (кроме режима «застряли»). Клавиша:
+        #    «следующая цель» (next_target) если так настроено (SEARCH_NEXT_TARGET) ИЛИ
+        #    это первый выбор после человеческой паузы (_start_search_next, чтобы не
+        #    переоткрыть труп рядом); иначе «ближайшая» (target_nearest). Нет клавиши
+        #    next_target — откат на ближайшую.
         if not prefer_vision:
-            if self._start_search_next and config.KEYS.get("next_target"):
-                ctl.press_action("next_target", respect_cooldown=False)
+            want_next = config.SEARCH_NEXT_TARGET or self._start_search_next
+            if want_next and config.KEYS.get("next_target"):
+                # после паузы форсируем; в обычном режиме — с учётом кулдауна
+                ctl.press_action("next_target", respect_cooldown=not self._start_search_next)
             else:
                 ctl.press_action("target_nearest")
             self._start_search_next = False
@@ -321,6 +329,17 @@ class BotFSM:
                 self._vision_pending = True
                 self._acquire_lock_until = now + config.ACQUIRE_LOCK
                 return
+        # 2.5) УХОД ОТ НЕБА: если давно (SKY_RECOVER_SEC) не удаётся никого взять в
+        #      бой — камера, вероятно, задралась в небо (там много белого -> ложные
+        #      «ники»). Резко доворачиваем ВНИЗ к земле и сбрасываем таймер.
+        if (config.CAMERA_SEARCH
+                and now - self._last_acquire_at > config.SKY_RECOVER_SEC
+                and now - self._last_camera >= config.CAMERA_INTERVAL):
+            self._last_camera = now
+            self._last_acquire_at = now      # чтобы не долбить вниз каждый тик
+            ctl.emit("давно нет цели — доворот камеры ВНИЗ (уход от неба)")
+            ctl.camera_drag(0, config.SKY_RECOVER_DY, center=self._camera_anchor())
+            return
         # 3) активный поиск: цель не находится долго -> поворот камеры, чтобы в
         #    поле зрения попали новые мобы. Не крутим сразу после вижн-клика
         #    (_vision_pending) — даём цели зарегистрироваться.
@@ -530,6 +549,7 @@ class BotFSM:
     def _enter_combat(self, now):
         self.state = COMBAT
         self._combat_started = now
+        self._last_acquire_at = now      # взяли цель -> сброс таймера ухода от неба
         self._target_lost_since = None
         self._target_hp_best = None      # сброс сторожа прогресса урона
         self._last_damage_at = now

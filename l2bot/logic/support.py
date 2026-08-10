@@ -44,7 +44,7 @@ class SupportController:
         self._last_buff_check = 0.0
         self._warned_focus = False
 
-    def maybe_act(self, frame, now, state=None):
+    def maybe_act(self, frame, now, state=None, fsm=None):
         """Проверить состояние окон и, если надо, поддержать. state — состояние FSM
         окна 1 ('SEARCH'/'COMBAT'/...). Вызывать каждый тик; сам троттлит и уходит в
         фокус-дэнс только при реальной необходимости."""
@@ -53,8 +53,8 @@ class SupportController:
         if now - self._last_check < config.DUAL_CHECK_INTERVAL:
             return
         self._last_check = now
-        # окно 1 в бою: после фокус-дэнса его таргет слетает -> при возврате нужно
-        # заново взять ближайшего моба (next_target). Для хила/маны/селф-хила.
+        # окно 1 в бою: фокус переключаем ПКМ (не сбивает таргет), поэтому при
+        # возврате цель на месте — просто возобновляем атаку (см. _cast).
         in_combat = (state == "COMBAT")
 
         # 1) СЕЛФ-ХИЛ окна 2 (по его собственному HP) — приоритет, саппорт должен выжить.
@@ -157,7 +157,7 @@ class SupportController:
         self._warned_focus = False
         party = settings.get("dual_party_key")
         follow = settings.get("dual_follow_key")
-        ctl.click(f2["x"], f2["y"])                   # активировать окно 2
+        ctl.click(f2["x"], f2["y"], button="right")   # активировать окно 2 (ПКМ — не сбивает таргет)
         ctl.sleep(config.DUAL_FOCUS_SETTLE)
         if select_main:
             if party:                                 # выделить первого (пати-мембер)
@@ -167,26 +167,18 @@ class SupportController:
             self._select_self2()                      # выделить СЕБЯ (клик по своей HP)
         ctl.press_key(skill_key)                      # каст
         ctl.sleep(config.DUAL_CAST_SETTLE)            # дать способности примениться
-        # вернуть слежение за первым: (после селф-хила снова выделить первого) +
-        # команда «следовать» (отдельная клавиша follow).
-        if not select_main and party:
-            ctl.press_key(party)
-            ctl.sleep(config.DUAL_TARGET_SETTLE)
+        # вернуть слежение за первым: выделить первого НЕСКОЛЬКО раз (наверняка),
+        # затем команда «следовать» (отдельная клавиша follow).
+        self._retarget_main(party)
         if follow:
             ctl.press_key(follow)
             ctl.sleep(config.DUAL_TARGET_SETTLE)
-        ctl.click(f1["x"], f1["y"])                   # вернуть фокус на окно 1
+        ctl.click(f1["x"], f1["y"], button="right")   # вернуть фокус на окно 1 (ПКМ — таргет цел)
         if retarget:
-            # окно 1 было в бою — его таргет мог слететь за время фокус-дэнса.
-            # Сразу берём ближайшего моба, иначе оно бьёт «в никуда». Клавиша —
-            # ОТДЕЛЬНАЯ (dual_retarget_key); если не задана, падаем на next_target
-            # окна 1 (иначе на «ближайшую цель»).
+            # окно 1 было в бою. ПКМ-фокус НЕ сбивает его таргет -> цель на месте,
+            # менять её не нужно, просто возобновляем атаку.
             ctl.sleep(config.DUAL_FOCUS_SETTLE)
-            rt = settings.get("dual_retarget_key")
-            if rt:
-                ctl.press_key(rt)
-            elif not ctl.press_action("next_target", respect_cooldown=False):
-                ctl.press_action("target_nearest", respect_cooldown=False)
+            ctl.press_action("attack", respect_cooldown=False)
         return True
 
     def _cast_selfbuff(self, skill_key):
@@ -202,18 +194,23 @@ class SupportController:
             return False
         self._warned_focus = False
         party = settings.get("dual_party_key")
-        ctl.click(f2["x"], f2["y"])                   # активировать окно 2
+        ctl.click(f2["x"], f2["y"], button="right")   # активировать окно 2 (ПКМ)
         ctl.sleep(config.DUAL_FOCUS_SETTLE)
         self._select_self2()                          # выделить СЕБЯ
         ctl.press_key(skill_key)                      # каст селф-баффа
         ctl.sleep(config.DUAL_CAST_SETTLE)            # дать примениться
-        if party:                                     # дважды таргет первого -> follow
-            ctl.press_key(party)
-            ctl.sleep(config.DUAL_TARGET_SETTLE)
-            ctl.press_key(party)
-            ctl.sleep(config.DUAL_TARGET_SETTLE)
-        ctl.click(f1["x"], f1["y"])                   # вернуть фокус на окно 1
+        self._retarget_main(party)                    # несколько раз таргет первого -> побежать
+        ctl.click(f1["x"], f1["y"], button="right")   # вернуть фокус на окно 1 (ПКМ)
         return True
+
+    def _retarget_main(self, party):
+        """Выделить первого НЕСКОЛЬКО раз (config.DUAL_TARGET_REPEAT) — чтобы цель
+        точно взялась и окно 2 побежало за ним."""
+        if not party:
+            return
+        for _ in range(max(1, config.DUAL_TARGET_REPEAT)):
+            ctl.press_key(party)
+            ctl.sleep(config.DUAL_TARGET_SETTLE)
 
     def _select_self2(self):
         """Выделить СВОЙ персонаж в окне 2 — клик по своей полоске HP (bar_hp2).
