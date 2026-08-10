@@ -40,13 +40,7 @@ set "ACLI="
 if exist "C:\AI\tools\arduino-cli\arduino-cli.exe" set "ACLI=C:\AI\tools\arduino-cli\arduino-cli.exe"
 if not defined ACLI if exist "%~dp0tools\arduino-cli\arduino-cli.exe" set "ACLI=%~dp0tools\arduino-cli\arduino-cli.exe"
 if not defined ACLI ( where arduino-cli >nul 2>&1 && set "ACLI=arduino-cli" )
-if not defined ACLI (
-    echo arduino-cli не найден — скачиваю ^(один раз^)...
-    set "ACDIR=%~dp0tools\arduino-cli"
-    if not exist "!ACDIR!" mkdir "!ACDIR!"
-    powershell -NoProfile -Command "try { Invoke-WebRequest -Uri 'https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip' -OutFile '!ACDIR!\acli.zip'; Expand-Archive -Force '!ACDIR!\acli.zip' '!ACDIR!'; exit 0 } catch { exit 1 }"
-    if exist "!ACDIR!\arduino-cli.exe" set "ACLI=!ACDIR!\arduino-cli.exe"
-)
+if not defined ACLI call :download_acli
 if not defined ACLI (
     echo Не удалось получить arduino-cli. Проверь интернет или прошей через Arduino IDE.
     pause
@@ -101,3 +95,21 @@ echo ============================================================
 echo.
 pause
 exit /b 0
+
+rem ==================== подпрограммы ====================
+:download_acli
+rem Скачать и распаковать arduino-cli в !ACDIR!. Сначала curl (встроен в Win10/11,
+rem сам умеет TLS/редиректы), запасной путь — PowerShell с принудительным TLS 1.2.
+echo arduino-cli не найден — качаю один раз, ~18 МБ...
+set "ACDIR=%~dp0tools\arduino-cli"
+set "ACURL=https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip"
+set "ACZIP=!ACDIR!\acli.zip"
+if not exist "!ACDIR!" mkdir "!ACDIR!"
+where curl >nul 2>&1 && curl -f -L -o "!ACZIP!" "!ACURL!"
+if not exist "!ACZIP!" (
+    echo curl не сработал — пробую через PowerShell, форсирую TLS 1.2...
+    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -UseBasicParsing -Uri '!ACURL!' -OutFile '!ACZIP!' } catch {}"
+)
+if exist "!ACZIP!" powershell -NoProfile -Command "try { Expand-Archive -Force '!ACZIP!' '!ACDIR!' } catch {}"
+if exist "!ACDIR!\arduino-cli.exe" set "ACLI=!ACDIR!\arduino-cli.exe"
+goto :eof
