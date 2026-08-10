@@ -5,13 +5,17 @@ cd /d "%~dp0"
 title l2bot: обновление из GitHub
 
 rem ============================================================
-rem  Обновляет уже установленный проект до свежей версии из GitHub.
-rem  Положи этот файл В ПАПКУ ПРОЕКТА (там, где папка l2bot и .git) и
-rem  запускай двойным кликом. Он делает git pull.
+rem  Обновляет проект из GitHub (git pull) в ТЕКУЩЕЙ папке.
+rem  Папку с ботом можно переносить куда угодно вместе с этим файлом:
+rem  скрипт всегда работает в своей папке, а если привязка к git по новому
+rem  пути потеряна (нет .git) — заново привязывает папку к GitHub здесь же.
 rem ============================================================
 
+set "REPO=https://github.com/Petrovalen/L2.git"
+
 echo ============================================================
-echo   Обновление l2bot из GitHub (git pull)
+echo   Обновление l2bot из GitHub
+echo   Папка: "%~dp0"
 echo ============================================================
 echo.
 
@@ -21,33 +25,58 @@ if not defined GIT (
     pause
     exit /b 1
 )
+
 if not exist ".git" (
-    echo Это не папка проекта из git - нет каталога .git. Запусти файл ИЗ папки,
-    echo куда установщик скачал проект - там лежит папка l2bot.
-    pause
-    exit /b 1
+    echo Папка не привязана к git — привязываю к GitHub по ТЕКУЩЕМУ пути...
+    "!GIT!" init -b main
+    if errorlevel 1 "!GIT!" init
+    "!GIT!" remote add origin "%REPO%" >nul 2>&1
+    "!GIT!" remote set-url origin "%REPO%" >nul 2>&1
+    echo Скачиваю из GitHub...
+    "!GIT!" fetch origin
+    if errorlevel 1 goto :neterr
+    "!GIT!" reset --hard origin/main
+    if errorlevel 1 goto :rebinderr
+    "!GIT!" branch --set-upstream-to=origin/main >nul 2>&1
+    goto :done
 )
 
+rem .git есть — убеждаемся, что origin указывает на наш репозиторий, и тянем.
+"!GIT!" remote add origin "%REPO%" >nul 2>&1
+"!GIT!" remote set-url origin "%REPO%" >nul 2>&1
 echo Тяну свежую версию...
 "!GIT!" pull --ff-only
-if !errorlevel! neq 0 (
-    echo.
-    echo   Обновиться по-быстрому не вышло. Обычно причина — локальные правки
-    echo   файлов проекта. Прокрути вывод выше, там причина.
-    echo   Личные настройки settings.json это не затрагивает - они не в git.
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto :pullerr
 
+:done
 echo.
 echo ============================================================
-echo   ГОТОВО. Обновлено.
+echo   ГОТОВО. Проект привязан к git здесь: "%~dp0"
 echo   Запуск бота:  l2bot\run_bot_admin.bat
-echo   Если что-то не стартует — прогони l2bot\УСТАНОВИТЬ.bat (зависимости).
 echo ============================================================
 echo.
 pause
 exit /b 0
+
+:pullerr
+echo.
+echo   Обновиться по-быстрому не вышло — обычно локальные правки файлов проекта.
+echo   Прокрути вывод выше, там причина. Настройки settings.json это не трогает.
+pause
+exit /b 1
+
+:neterr
+echo.
+echo   Не удалось скачать из GitHub. Проверь интернет и повтори.
+pause
+exit /b 1
+
+:rebinderr
+echo.
+echo   Не удалось привязать папку к git. Проще переустановить: удали .git и
+echo   запусти УСТАНОВИТЬ_С_НУЛЯ.bat, либо пришли текст ошибки выше.
+pause
+exit /b 1
 
 rem ==================== подпрограммы ====================
 :find_git
