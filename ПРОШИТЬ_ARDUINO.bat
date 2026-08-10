@@ -98,18 +98,25 @@ exit /b 0
 
 rem ==================== подпрограммы ====================
 :download_acli
-rem Скачать и распаковать arduino-cli в !ACDIR!. Сначала curl (встроен в Win10/11,
-rem сам умеет TLS/редиректы), запасной путь — PowerShell с принудительным TLS 1.2.
+rem Скачать и распаковать arduino-cli в !ACDIR!. Два источника (у arduino.cc CDN
+rem иногда отдаёт 403) с браузерным User-Agent; на каждом сначала curl, потом
+rem PowerShell (TLS 1.2). Второй источник — релиз с GitHub (надёжный).
 echo arduino-cli не найден — качаю один раз, ~18 МБ...
 set "ACDIR=%~dp0tools\arduino-cli"
-set "ACURL=https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip"
 set "ACZIP=!ACDIR!\acli.zip"
+set "URL1=https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip"
+set "URL2=https://github.com/arduino/arduino-cli/releases/download/v1.5.1/arduino-cli_1.5.1_Windows_64bit.zip"
 if not exist "!ACDIR!" mkdir "!ACDIR!"
-where curl >nul 2>&1 && curl -f -L -o "!ACZIP!" "!ACURL!"
-if not exist "!ACZIP!" (
-    echo curl не сработал — пробую через PowerShell, форсирую TLS 1.2...
-    powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -UseBasicParsing -Uri '!ACURL!' -OutFile '!ACZIP!' } catch {}"
-)
+call :try_dl "!URL1!"
+if not exist "!ACZIP!" echo Источник 1 не дал файл — пробую GitHub...
+if not exist "!ACZIP!" call :try_dl "!URL2!"
 if exist "!ACZIP!" powershell -NoProfile -Command "try { Expand-Archive -Force '!ACZIP!' '!ACDIR!' } catch {}"
 if exist "!ACDIR!\arduino-cli.exe" set "ACLI=!ACDIR!\arduino-cli.exe"
+goto :eof
+
+:try_dl
+rem %1 = URL -> качает в !ACZIP!: curl с браузерным UA, если нет файла — PowerShell.
+set "U=%~1"
+where curl >nul 2>&1 && curl -f -L -A "Mozilla/5.0" -o "!ACZIP!" "!U!"
+if not exist "!ACZIP!" powershell -NoProfile -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; try { Invoke-WebRequest -UseBasicParsing -UserAgent 'Mozilla/5.0' -Uri '!U!' -OutFile '!ACZIP!' } catch {}"
 goto :eof
