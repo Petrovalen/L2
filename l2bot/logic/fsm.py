@@ -332,7 +332,7 @@ class BotFSM:
         # 2.5) УХОД ОТ НЕБА: если давно (SKY_RECOVER_SEC) не удаётся никого взять в
         #      бой — камера, вероятно, задралась в небо (там много белого -> ложные
         #      «ники»). Резко доворачиваем ВНИЗ к земле и сбрасываем таймер.
-        if (config.CAMERA_SEARCH
+        if (config.CAMERA_SEARCH and not config.CAMERA_HORIZONTAL_ONLY
                 and now - self._last_acquire_at > config.SKY_RECOVER_SEC
                 and now - self._last_camera >= config.CAMERA_INTERVAL):
             self._last_camera = now
@@ -350,7 +350,8 @@ class BotFSM:
             self._camera_step += 1
             anchor = self._camera_anchor()
             every = max(1, config.CAMERA_VERTICAL_EVERY)
-            if config.CAMERA_VERTICAL_SWING and self._camera_step % every == 0:
+            if (config.CAMERA_VERTICAL_SWING and not config.CAMERA_HORIZONTAL_ONLY
+                    and self._camera_step % every == 0):
                 # вертикальный свинг: наклон обзора вверх/вниз (мобы по склону),
                 # чередуем направление
                 dy = config.CAMERA_VERTICAL_SWING

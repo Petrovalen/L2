@@ -477,6 +477,10 @@ class App:
         tk.Checkbutton(camframe, text="Крутить камеру, когда цель не найдена",
                        variable=self.camera_var,
                        command=self._on_camera_toggle).pack(anchor="w", padx=6)
+        self.cam_horiz_var = tk.BooleanVar(value=bool(getattr(config, "CAMERA_HORIZONTAL_ONLY", False)))
+        tk.Checkbutton(camframe, text="Только горизонтальный поворот (без вертикали и неба)",
+                       variable=self.cam_horiz_var,
+                       command=self._on_camera_horiz_toggle).pack(anchor="w", padx=6)
         cr = tk.Frame(camframe)
         cr.pack(fill="x", padx=6, pady=(0, 4))
         tk.Label(cr, text="Скорость поворота", width=18, anchor="w").pack(side="left")
@@ -874,6 +878,12 @@ class App:
         config.CAMERA_SEARCH = v
         settings.set("camera_search", v)
         self.mob_status.set(f"Активный поиск камерой: {'включён' if v else 'выключен'}")
+
+    def _on_camera_horiz_toggle(self):
+        v = bool(self.cam_horiz_var.get())
+        config.CAMERA_HORIZONTAL_ONLY = v
+        settings.set("camera_horizontal_only", v)
+        self.mob_status.set("Поворот камеры: %s" % ("только горизонт" if v else "горизонт + вертикаль"))
 
     def _on_camera_speed(self, val):
         config.CAMERA_DRAG_DISTANCE = int(float(val))   # применяем сразу; сохраняем при отпускании
