@@ -6,6 +6,12 @@
   игра их принимает. Питон-бот шлёт этому скетчу построчные команды по USB Serial
   (115200), а скетч выполняет их через Keyboard/Mouse.
 
+  ВАЖНО (стабильность): приём команд сделан на ФИКСИРОВАННОМ char-буфере, без
+  String. У ATmega32U4 всего ~2.5 КБ ОЗУ, а String на тысячах команд фрагментирует
+  кучу — через ~час выделения начинают срываться и команды теряются/приходят
+  битыми (симптом: «с первого раза клавиша не срабатывает»). Фиксированный буфер
+  этого не допускает.
+
   Протокол (одна команда = одна строка, оканчивается '\n'):
     PING                 -> отвечает "PONG" (проверка, что прошита наша прошивка)
     KEY <name>           -> нажать+отпустить клавишу. <name>:
@@ -24,15 +30,17 @@
 */
 #include <Keyboard.h>
 #include <Mouse.h>
+#include <string.h>
+#include <stdlib.h>
 
-String command;
+static char command[84];        // строка команды (без String — не фрагментирует кучу)
+static uint8_t cmdLen = 0;
 
 void setup() {
   Serial.begin(115200);
   Keyboard.begin();
   Mouse.begin();
   randomSeed(analogRead(A0));
-  command.reserve(80);
   delay(300);
   Serial.println("L2HID");           // сигнал: наша прошивка загрузилась
 }
@@ -61,30 +69,32 @@ void smoothMove(int totalX, int totalY, int durationMs) {
   }
 }
 
-// Перевести имя клавиши в HID-код. 0 = не распознано.
-int keyCode(const String& n) {
-  if (n.length() == 1) return (uint8_t)n[0];          // печатный символ: 2,4,a,...
-  if ((n[0] == 'f' || n[0] == 'F') && n.length() <= 3) {
-    int num = n.substring(1).toInt();
+// Перевести имя клавиши (C-строка) в HID-код. 0 = не распознано.
+int keyCode(const char* n) {
+  size_t len = strlen(n);
+  if (len == 0) return 0;
+  if (len == 1) return (uint8_t)n[0];                 // печатный символ: 2,4,a,...
+  if ((n[0] == 'f' || n[0] == 'F') && len <= 3) {
+    int num = atoi(n + 1);
     if (num >= 1 && num <= 12) return KEY_F1 + (num - 1);
   }
-  if (n == "enter" || n == "return") return KEY_RETURN;
-  if (n == "esc") return KEY_ESC;
-  if (n == "space") return ' ';
-  if (n == "tab") return KEY_TAB;
-  if (n == "backspace") return KEY_BACKSPACE;
-  if (n == "delete") return KEY_DELETE;
-  if (n == "up") return KEY_UP_ARROW;
-  if (n == "down") return KEY_DOWN_ARROW;
-  if (n == "left") return KEY_LEFT_ARROW;
-  if (n == "right") return KEY_RIGHT_ARROW;
-  if (n == "ctrl") return KEY_LEFT_CTRL;
-  if (n == "shift") return KEY_LEFT_SHIFT;
-  if (n == "alt") return KEY_LEFT_ALT;
+  if (!strcmp(n, "enter") || !strcmp(n, "return")) return KEY_RETURN;
+  if (!strcmp(n, "esc")) return KEY_ESC;
+  if (!strcmp(n, "space")) return ' ';
+  if (!strcmp(n, "tab")) return KEY_TAB;
+  if (!strcmp(n, "backspace")) return KEY_BACKSPACE;
+  if (!strcmp(n, "delete")) return KEY_DELETE;
+  if (!strcmp(n, "up")) return KEY_UP_ARROW;
+  if (!strcmp(n, "down")) return KEY_DOWN_ARROW;
+  if (!strcmp(n, "left")) return KEY_LEFT_ARROW;
+  if (!strcmp(n, "right")) return KEY_RIGHT_ARROW;
+  if (!strcmp(n, "ctrl")) return KEY_LEFT_CTRL;
+  if (!strcmp(n, "shift")) return KEY_LEFT_SHIFT;
+  if (!strcmp(n, "alt")) return KEY_LEFT_ALT;
   return 0;
 }
 
-void pressKey(const String& name) {
+void pressKey(const char* name) {
   int code = keyCode(name);
   if (code == 0) return;
   Keyboard.press((uint8_t)code);
@@ -92,31 +102,36 @@ void pressKey(const String& name) {
   Keyboard.releaseAll();
 }
 
-void handle(String cmd) {
-  cmd.trim();
-  if (cmd.length() == 0) return;
-  if (cmd == "PING") {
+void handle(char* cmd) {
+  // срезать хвостовые пробелы/CR и ведущие пробелы (без String)
+  int n = (int)strlen(cmd);
+  while (n > 0 && (cmd[n - 1] == ' ' || cmd[n - 1] == '\t' || cmd[n - 1] == '\r'))
+    cmd[--n] = '\0';
+  while (*cmd == ' ') cmd++;
+  if (*cmd == '\0') return;
+
+  if (!strcmp(cmd, "PING")) {
     Serial.println("PONG");
-  } else if (cmd.startsWith("KEY ")) {
-    pressKey(cmd.substring(4));
-  } else if (cmd == "CLICK") {
+  } else if (!strncmp(cmd, "KEY ", 4)) {
+    pressKey(cmd + 4);
+  } else if (!strcmp(cmd, "CLICK")) {
     Mouse.click(MOUSE_LEFT);
-  } else if (cmd == "RCLICK") {
+  } else if (!strcmp(cmd, "RCLICK")) {
     Mouse.click(MOUSE_RIGHT);
-  } else if (cmd == "LDOWN") {
+  } else if (!strcmp(cmd, "LDOWN")) {
     Mouse.press(MOUSE_LEFT);
-  } else if (cmd == "LUP") {
+  } else if (!strcmp(cmd, "LUP")) {
     Mouse.release(MOUSE_LEFT);
-  } else if (cmd == "RDOWN") {
+  } else if (!strcmp(cmd, "RDOWN")) {
     Mouse.press(MOUSE_RIGHT);
-  } else if (cmd == "RUP") {
+  } else if (!strcmp(cmd, "RUP")) {
     Mouse.release(MOUSE_RIGHT);
-  } else if (cmd.startsWith("MOVE ")) {
+  } else if (!strncmp(cmd, "MOVE ", 5)) {
     int dx, dy, ms;
-    if (sscanf(cmd.c_str(), "MOVE %d %d %d", &dx, &dy, &ms) == 3) smoothMove(dx, dy, ms);
-  } else if (cmd.startsWith("DRAG ")) {
+    if (sscanf(cmd, "MOVE %d %d %d", &dx, &dy, &ms) == 3) smoothMove(dx, dy, ms);
+  } else if (!strncmp(cmd, "DRAG ", 5)) {
     int dx, dy, ms;
-    if (sscanf(cmd.c_str(), "DRAG %d %d %d", &dx, &dy, &ms) == 3) {
+    if (sscanf(cmd, "DRAG %d %d %d", &dx, &dy, &ms) == 3) {
       Mouse.press(MOUSE_RIGHT);
       delay(80);
       smoothMove(dx, dy, ms);
@@ -133,10 +148,12 @@ void loop() {
   while (Serial.available() > 0) {
     char c = (char)Serial.read();
     if (c == '\n') {
+      command[cmdLen] = '\0';
       handle(command);
-      command = "";
-    } else if (c != '\r' && command.length() < 79) {
-      command += c;
+      cmdLen = 0;
+    } else if (c != '\r') {
+      if (cmdLen < sizeof(command) - 1) command[cmdLen++] = c;
+      // переполнение (строка длиннее буфера) — лишнее отбрасываем, не ломая кучу
     }
   }
 }
