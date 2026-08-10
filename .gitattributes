@@ -1,4 +1,7 @@
 # Скрипты Windows должны иметь CRLF, иначе cmd.exe их ломает
 # (окно установщика/лаунчера «мигает и закрывается»).
-*.bat text eol=crlf
-*.cmd text eol=crlf
+# Храним .bat/.cmd КАК ЕСТЬ (без EOL-нормализации), а в репозитории они лежат
+# с CRLF — тогда и git checkout, и «Download raw file» на GitHub отдают CRLF
+# на ЛЮБОМ компьютере, независимо от настроек git (core.autocrlf).
+*.bat -text
+*.cmd -text
