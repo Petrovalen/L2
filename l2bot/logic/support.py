@@ -165,7 +165,7 @@ class SupportController:
                 ctl.sleep(config.DUAL_TARGET_SETTLE)
         else:
             self._select_self2()                      # выделить СЕБЯ (клик по своей HP)
-        ctl.press_key(skill_key)                      # каст
+        self._press_skill(skill_key)                  # каст НЕСКОЛЬКО раз подряд (быстро) — наверняка
         ctl.sleep(config.DUAL_CAST_SETTLE)            # дать способности примениться
         # вернуть слежение за первым: выделить первого НЕСКОЛЬКО раз (наверняка),
         # затем команда «следовать» (отдельная клавиша follow).
@@ -197,7 +197,7 @@ class SupportController:
         ctl.click(f2["x"], f2["y"], button="right")   # активировать окно 2 (ПКМ)
         ctl.sleep(config.DUAL_FOCUS_SETTLE)
         self._select_self2()                          # выделить СЕБЯ
-        ctl.press_key(skill_key)                      # каст селф-баффа
+        self._press_skill(skill_key)                  # каст НЕСКОЛЬКО раз подряд (быстро) — наверняка
         ctl.sleep(config.DUAL_CAST_SETTLE)            # дать примениться
         self._retarget_main(party)                    # несколько раз таргет первого -> побежать
         ctl.click(f1["x"], f1["y"], button="right")   # вернуть фокус на окно 1 (ПКМ)
@@ -211,6 +211,14 @@ class SupportController:
         for _ in range(max(1, config.DUAL_TARGET_REPEAT)):
             ctl.press_key(party)
             ctl.sleep(config.DUAL_TARGET_SETTLE)
+
+    def _press_skill(self, key):
+        """Нажать клавишу способности несколько раз (config.DUAL_CAST_REPEAT) —
+        первое нажатие после смены фокуса иногда теряется. БЫСТРО: короткий гэп
+        DUAL_CAST_GAP между нажатиями, чтобы не тормозить общий процесс."""
+        for _ in range(max(1, config.DUAL_CAST_REPEAT)):
+            ctl.press_key(key)
+            ctl.sleep(config.DUAL_CAST_GAP)
 
     def _select_self2(self):
         """Выделить СВОЙ персонаж в окне 2 — клик по своей полоске HP (bar_hp2).
