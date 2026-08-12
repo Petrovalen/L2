@@ -176,8 +176,8 @@ class SupportController:
         ctl.click(f1["x"], f1["y"], button="right")   # вернуть фокус на окно 1 (ПКМ — таргет цел)
         if retarget:
             # окно 1 было в бою. ПКМ-фокус НЕ сбивает его таргет -> цель на месте,
-            # менять её не нужно, просто возобновляем атаку.
-            ctl.sleep(config.DUAL_FOCUS_SETTLE)
+            # менять её не нужно, просто возобновляем атаку. Пауза короткая (быстро).
+            ctl.sleep(config.DUAL_RETURN_SETTLE)
             ctl.press_action("attack", respect_cooldown=False)
         return True
 
