@@ -481,6 +481,10 @@ class App:
         tk.Checkbutton(camframe, text="Только горизонтальный поворот (без вертикали и неба)",
                        variable=self.cam_horiz_var,
                        command=self._on_camera_horiz_toggle).pack(anchor="w", padx=6)
+        self.keep_target_var = tk.BooleanVar(value=bool(getattr(config, "KEEP_TARGET_ON_SCREEN", True)))
+        tk.Checkbutton(camframe, text="Держать цель в кадре (крутить камеру за целью в бою)",
+                       variable=self.keep_target_var,
+                       command=self._on_keep_target_toggle).pack(anchor="w", padx=6)
         cr = tk.Frame(camframe)
         cr.pack(fill="x", padx=6, pady=(0, 4))
         tk.Label(cr, text="Скорость поворота", width=18, anchor="w").pack(side="left")
@@ -884,6 +888,12 @@ class App:
         config.CAMERA_HORIZONTAL_ONLY = v
         settings.set("camera_horizontal_only", v)
         self.mob_status.set("Поворот камеры: %s" % ("только горизонт" if v else "горизонт + вертикаль"))
+
+    def _on_keep_target_toggle(self):
+        v = bool(self.keep_target_var.get())
+        config.KEEP_TARGET_ON_SCREEN = v
+        settings.set("keep_target_on_screen", v)
+        self.mob_status.set("Камера за целью: %s" % ("вкл" if v else "выкл"))
 
     def _on_camera_speed(self, val):
         config.CAMERA_DRAG_DISTANCE = int(float(val))   # применяем сразу; сохраняем при отпускании

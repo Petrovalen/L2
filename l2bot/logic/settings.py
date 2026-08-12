@@ -63,6 +63,7 @@ _CONFIG_OVERRIDES = {
     "target_name_filter": "TARGET_NAME_FILTER",
     "camera_search": "CAMERA_SEARCH",
     "camera_horizontal_only": "CAMERA_HORIZONTAL_ONLY",
+    "keep_target_on_screen": "KEEP_TARGET_ON_SCREEN",
     "search_camera_after": "SEARCH_CAMERA_AFTER",
     "camera_interval": "CAMERA_INTERVAL",
     "camera_drag_distance": "CAMERA_DRAG_DISTANCE",
